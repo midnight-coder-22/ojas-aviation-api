@@ -26,12 +26,18 @@ app = FastAPI(
 # In production, replace cors_origin with your exact GitHub Pages URL.
 # Example: https://yourorg.github.io
 # -----------------------------------------------------------------------------
+cors_origins = [
+    origin.strip()
+    for origin in settings.cors_origin.split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = [settings.cors_origin],
-    allow_credentials = True,
-    allow_methods     = ["GET"],   # This API is read-only — only GET is needed
-    allow_headers     = ["*"],
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 # -----------------------------------------------------------------------------
