@@ -27,3 +27,6 @@ config.py
 # IDE files
 .vscode/
 .idea/
+
+cloudrun.env.yaml
+*.env.yaml

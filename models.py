@@ -162,3 +162,135 @@ class DepartmentSummary(BaseModel):
     status_breakdown: dict[str, int]     # e.g. { "New": 10, "InProcess": 5, "Completed": 2 }
     priority_breakdown: dict[str, int]   # e.g. { "Low": 12, "Medium": 3, "High": 2 }
     last_refreshed:   Optional[datetime]
+
+
+# =============================================================================
+# models.py — Pydantic Request and Response Models
+# =============================================================================
+
+
+from datetime import date, datetime
+from typing import Optional
+from pydantic import BaseModel
+
+
+# =============================================================================
+# AUTH
+# =============================================================================
+
+class LoginRequest(BaseModel):
+    username:  str       # accepts username OR employee_id
+    password:  str
+
+
+class LoginResponse(BaseModel):
+    access_token:    str
+    token_type:      str = "bearer"
+    user_id:         str
+    full_name:       str
+    username:        str
+    role:            str
+    department:      str
+    dashboard_access: str
+    can_edit_data:   bool
+    can_flag:        bool
+    can_resolve_flag: bool
+
+
+# =============================================================================
+# DASHBOARD — Work Order KPI
+# =============================================================================
+
+class WorkOrderKPI(BaseModel):
+    wo_id:            str
+    wo_name:          str
+    dept_in_date:     Optional[date]
+    wo_ageing_days:   Optional[int]
+    dept_ageing_days: Optional[int]
+    planned_qty:      int
+    next_dept:        Optional[str]
+    priority:         str
+    status:           str
+    expected_steps:   int
+    done_steps:       int
+    qc_alert:         bool
+    mi_alert:         bool
+    has_active_flag:  bool            # True if WO has an unresolved flag
+    last_refreshed:   Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class DepartmentResponse(BaseModel):
+    department:   str
+    record_count: int
+    data:         list[WorkOrderKPI]
+
+
+class DepartmentSummary(BaseModel):
+    department:         str
+    total_wos:          int
+    qc_alert_count:     int
+    mi_alert_count:     int
+    flagged_count:      int           # WOs with has_active_flag = True
+    status_breakdown:   dict[str, int]
+    priority_breakdown: dict[str, int]
+    last_refreshed:     Optional[datetime]
+
+
+# =============================================================================
+# FLAGS
+# =============================================================================
+
+class FlagCreateRequest(BaseModel):
+    wo_ids:     list[str]    # one or more WO IDs to flag in one action
+    item_no:    Optional[str] = None
+    department: str
+
+
+class FlagResolveRequest(BaseModel):
+    wo_ids: list[str]        # one or more WO IDs to resolve in one action
+
+
+class FlagRecord(BaseModel):
+    sr_no:         Optional[int]
+    wo_id:         str
+    item_no:       Optional[str]
+    department:    str
+    flag_status:   int
+    raised_date:   Optional[datetime]
+    resolved_date: Optional[datetime]
+    raised_by:     Optional[str]
+    resolved_by:   Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+# =============================================================================
+# EDIT DATA — Google Sheets Read
+# =============================================================================
+
+class SheetDataResponse(BaseModel):
+    sheet_name:   str
+    headers:      list[str]
+    rows:         list[list]          # Raw rows as returned from Google Sheets
+    total_rows:   int
+
+
+class SheetWriteRequest(BaseModel):
+    sheet_name:   str                 # "wos" or "ows"
+    headers:      list[str]
+    rows:         list[list]          # Full updated dataset to write back
+
+
+class SheetWriteResponse(BaseModel):
+    success:      bool
+    message:      str
+    rows_written: int
+    job_triggered: bool               # Whether Databricks pipeline job was triggered
+
+
+# ///////////////////////
+
