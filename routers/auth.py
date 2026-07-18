@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 # -----------------------------------------------------------------------------
 @router.post("/login", response_model=LoginResponse, summary="User login")
 def login(body: LoginRequest):
-    print(body)
+    # print(body)
     """
     Authenticate a user by username (or employee_id) and password.
 
