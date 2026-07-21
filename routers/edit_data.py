@@ -30,12 +30,12 @@ SHEET_CONFIG = {
     "wos": {
         "spreadsheet_id": settings.wos_spreadsheet_id,
         "range":          "WorkOrderSummaryReport!A:T",   # columns A through T
-        "sheet_name":     "WorkOrderSummaryReport",
+        "sheet_name":     "Sheet1",
     },
     "ows": {
         "spreadsheet_id": settings.ows_spreadsheet_id,
         "range":          "OperationWiseWIPStatas!A:S",   # columns A through S
-        "sheet_name":     "OperationWiseWIPStatas",
+        "sheet_name":     "Sheet1",
     },
 }
 
