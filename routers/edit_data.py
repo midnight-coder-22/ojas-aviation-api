@@ -32,13 +32,13 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_CONFIG = {
     "wos": {
         "spreadsheet_id": settings.wos_spreadsheet_id,
-        "sheet_name": "Sheet1",
-        "range": "'Sheet1'!A:T",
+        "tab_name": "Sheet1",
+        "columns": "A:T",
     },
     "ows": {
         "spreadsheet_id": settings.ows_spreadsheet_id,
-        "sheet_name": "Sheet1",
-        "range": "'Sheet1'!A:S",
+        "tab_name": "Sheet1",
+        "columns": "A:S",
     },
 }
 
@@ -46,9 +46,6 @@ SHEET_CONFIG = {
 def _get_sheet_range(config: dict) -> str:
     """
     Build a valid Google Sheets A1 range.
-
-    Quoting the tab name also supports spaces or special characters if the
-    worksheet is renamed later.
     """
     tab_name = str(config["tab_name"]).replace("'", "''")
     return f"'{tab_name}'!{config['columns']}"
