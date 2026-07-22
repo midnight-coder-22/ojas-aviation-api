@@ -24,20 +24,34 @@ router = APIRouter(prefix="/api/edit-data", tags=["Edit Data"])
 # Google Sheets API scope — read + write
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# Map of sheet keys → spreadsheet IDs and sheet tab names
-# Adjust the tab names if yours differ
+# Map API sheet keys to Google spreadsheet documents and worksheet tabs.
+#
+# spreadsheet_id = the Google Sheets document ID
+# tab_name       = the worksheet/tab inside that document
+# columns        = the columns used by the edit-data grid
 SHEET_CONFIG = {
     "wos": {
         "spreadsheet_id": settings.wos_spreadsheet_id,
-        "range":          "WorkOrderSummaryReport!A:T",   # columns A through T
-        "sheet_name":     "Sheet1",
+        "tab_name": "Sheet1",
+        "columns": "A:T",
     },
     "ows": {
         "spreadsheet_id": settings.ows_spreadsheet_id,
-        "range":          "OperationWiseWIPStatas!A:S",   # columns A through S
-        "sheet_name":     "Sheet1",
+        "tab_name": "Sheet1",
+        "columns": "A:S",
     },
 }
+
+
+def _get_sheet_range(config: dict) -> str:
+    """
+    Build a valid Google Sheets A1 range.
+
+    Quoting the tab name also supports spaces or special characters if the
+    worksheet is renamed later.
+    """
+    tab_name = str(config["tab_name"]).replace("'", "''")
+    return f"'{tab_name}'!{config['columns']}"
 
 
 def _get_sheets_service():
@@ -104,7 +118,7 @@ def get_wos_sheet(user: dict = Depends(require_permission("can_edit_data"))):
     try:
         result = (
             service.spreadsheets().values()
-            .get(spreadsheetId=config["spreadsheet_id"], range=config["range"])
+            .get(spreadsheetId=config["spreadsheet_id"], range=_get_sheet_range(config))
             .execute()
         )
     except Exception as e:
@@ -146,7 +160,7 @@ def get_ows_sheet(user: dict = Depends(require_permission("can_edit_data"))):
     try:
         result = (
             service.spreadsheets().values()
-            .get(spreadsheetId=config["spreadsheet_id"], range=config["range"])
+            .get(spreadsheetId=config["spreadsheet_id"], range=_get_sheet_range(config))
             .execute()
         )
     except Exception as e:
@@ -206,13 +220,13 @@ def commit_changes(
         # Clear the existing sheet content first
         service.spreadsheets().values().clear(
             spreadsheetId = config["spreadsheet_id"],
-            range         = config["range"],
+            range         = _get_sheet_range(config),
         ).execute()
 
         # Write the new data
         service.spreadsheets().values().update(
             spreadsheetId     = config["spreadsheet_id"],
-            range             = config["range"],
+            range             = _get_sheet_range(config),
             valueInputOption  = "USER_ENTERED",
             body              = {"values": all_rows},
         ).execute()
@@ -225,11 +239,15 @@ def commit_changes(
 
     return SheetWriteResponse(
         success       = True,
-        message       = (
-            f"Successfully wrote {rows_to_write} rows to {config['sheet_name']}. "
-            + ("Pipeline refresh triggered." if job_triggered else
-               "Pipeline refresh not triggered (job ID not configured).")
-        ),
+        message=(
+        f"Successfully wrote {rows_to_write} rows to "
+        f"{body.sheet_name.upper()} ({config['tab_name']}). "
+        + (
+            "Pipeline refresh triggered."
+            if job_triggered
+            else "Pipeline refresh not triggered (job ID not configured)."
+        )
+    ),
         rows_written  = rows_to_write,
         job_triggered = job_triggered,
     )
