@@ -8,36 +8,40 @@
 
 from __future__ import annotations
 from datetime import date, datetime
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from typing import Optional, Any, Dict, List
 
 
 class SheetDataResponse(BaseModel):
+    """
+    Response returned by the raw Google Sheets read endpoints.
+
+    headers:
+        Column names from the first row of the worksheet.
+
+    rows:
+        Worksheet data represented as a two-dimensional array.
+        Each inner list represents one Google Sheets row.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     success: bool = True
     sheet_name: Optional[str] = None
-    table_name: Optional[str] = None
-    columns: List[str] = []
-    rows: List[Dict[str, Any]] = []
-    data: List[Dict[str, Any]] = []
-    total_rows: Optional[int] = None
+
+    headers: List[str] = Field(default_factory=list)
+    rows: List[List[Any]] = Field(default_factory=list)
+
+    total_rows: int = 0
     message: Optional[str] = None
 
 
 class SheetWriteRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    sheet_name: Optional[str] = None
-    table_name: Optional[str] = None
-    record_id: Optional[str] = None
-    row_id: Optional[str] = None
-    row_index: Optional[int] = None
-    column_name: Optional[str] = None
-    value: Optional[Any] = None
-    data: Optional[Dict[str, Any]] = None
-    updates: Optional[Dict[str, Any]] = None
-    updated_by: Optional[str] = None
+    sheet_name: str
+    headers: List[str] = Field(default_factory=list)
+    rows: List[List[Any]] = Field(default_factory=list)
 
 
 class SheetWriteResponse(BaseModel):
@@ -46,11 +50,8 @@ class SheetWriteResponse(BaseModel):
     success: bool = True
     message: Optional[str] = None
     sheet_name: Optional[str] = None
-    table_name: Optional[str] = None
-    record_id: Optional[str] = None
-    row_id: Optional[str] = None
-    rows_affected: Optional[int] = None
-    updated_data: Optional[Dict[str, Any]] = None
+    rows_written: int = 0
+    job_triggered: bool = False
 
 
 # class LoginRequest(BaseModel):

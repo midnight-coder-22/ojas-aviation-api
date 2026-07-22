@@ -32,13 +32,13 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_CONFIG = {
     "wos": {
         "spreadsheet_id": settings.wos_spreadsheet_id,
-        "tab_name": "Sheet1",
-        "columns": "A:T",
+        "sheet_name": "Sheet1",
+        "range": "'Sheet1'!A:T",
     },
     "ows": {
         "spreadsheet_id": settings.ows_spreadsheet_id,
-        "tab_name": "Sheet1",
-        "columns": "A:S",
+        "sheet_name": "Sheet1",
+        "range": "'Sheet1'!A:S",
     },
 }
 
