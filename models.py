@@ -126,6 +126,8 @@ class WorkOrderKPI(BaseModel):
     wo_id:            str                # Work Order ID
     wo_name:          str                # Item name for dashboard display
     dept_in_date:     Optional[date]     # Date WO arrived at current department (can be null)
+    wo_target_date: Optional[date] = None
+    dept_target_date: Optional[date] = None
     wo_ageing_days:   Optional[int]      # Total days since WO was opened (null if no start date)
     dept_ageing_days: Optional[int]      # Days in current department (null if no dept-in date)
     planned_qty:      int                # Planned production quantity
@@ -206,6 +208,7 @@ class WorkOrderKPI(BaseModel):
     wo_id:            str
     wo_name:          str
     dept_in_date:     Optional[date]
+    dept_target_date: Optional[date] = None
     wo_ageing_days:   Optional[int]
     dept_ageing_days: Optional[int]
     planned_qty:      int
