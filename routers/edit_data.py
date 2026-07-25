@@ -18,8 +18,11 @@ from googleapiclient.discovery import build
 from models import SheetDataResponse, SheetWriteRequest, SheetWriteResponse
 from dependencies import require_permission
 from config import settings
+import logging
 
 router = APIRouter(prefix="/api/edit-data", tags=["Edit Data"])
+
+logger = logging.getLogger(__name__)
 
 # Google Sheets API scope — read + write
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -72,28 +75,79 @@ def _get_sheets_service():
         raise HTTPException(status_code=500, detail=f"Google auth error: {e}")
 
 
-def _trigger_databricks_job() -> bool:
+def _trigger_databricks_job() -> tuple[bool, str | None]:
     """
-    Trigger the Databricks pipeline job via the Jobs Runs Now API.
-    Returns True if the trigger succeeded, False if it failed (non-fatal —
-    the data write already completed so we don't want to roll it back).
-    """
-    if not settings.databricks_job_id:
-        return False        # Job ID not configured — skip silently
+    Trigger the Databricks data-refresh job.
 
-    url     = f"https://{settings.databricks_host}/api/2.1/jobs/run-now"
-    headers = {
-        "Authorization": f"Bearer {settings.databricks_token}",
-        "Content-Type":  "application/json",
-    }
-    payload = {"job_id": int(settings.databricks_job_id)}
+    The Google Sheets write has already completed before this function runs,
+    so a Databricks error must not turn the entire commit request into a 500.
+    """
+
+    raw_job_id = str(settings.databricks_job_id or "").strip()
+
+    if not raw_job_id:
+        return False, "DATABRICKS_JOB_ID is not configured."
 
     try:
-        resp = httpx.post(url, json=payload, headers=headers, timeout=10)
-        return resp.status_code == 200
-    except Exception:
-        return False        # Network issue — fail silently, data write succeeded
+        job_id = int(raw_job_id)
 
+        databricks_host = str(settings.databricks_host or "").strip()
+        databricks_host = databricks_host.removeprefix("https://")
+        databricks_host = databricks_host.removeprefix("http://")
+        databricks_host = databricks_host.rstrip("/")
+
+        if not databricks_host:
+            return False, "DATABRICKS_HOST is not configured."
+
+        databricks_token = str(settings.databricks_token or "").strip()
+
+        if not databricks_token:
+            return False, "DATABRICKS_TOKEN is not configured."
+
+        url = f"https://{databricks_host}/api/2.1/jobs/run-now"
+
+        headers = {
+            "Authorization": f"Bearer {databricks_token}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "job_id": job_id,
+        }
+
+        response = httpx.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=20.0,
+            follow_redirects=True,
+        )
+
+        if response.status_code not in {200, 201, 202}:
+            error_message = (
+                f"Databricks returned HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+
+            logger.error(error_message)
+            return False, error_message
+
+        return True, None
+
+    except ValueError:
+        error_message = (
+            "DATABRICKS_JOB_ID must contain only the numeric Databricks "
+            f"job ID. Received: {raw_job_id!r}"
+        )
+
+        logger.exception(error_message)
+        return False, error_message
+
+    except Exception as error:
+        error_message = f"Databricks job trigger failed: {error}"
+
+        logger.exception(error_message)
+        return False, error_message
 
 # -----------------------------------------------------------------------------
 # GET /api/edit-data/wos
@@ -232,19 +286,24 @@ def commit_changes(
         raise HTTPException(status_code=502, detail=f"Google Sheets write failed: {e}")
 
     # Trigger the Databricks pipeline job (best-effort, non-fatal)
-    job_triggered = _trigger_databricks_job()
+    job_triggered, job_error = _trigger_databricks_job()
+
+    if job_triggered:
+        refresh_message = "Databricks pipeline refresh triggered."
+    else:
+        refresh_message = (
+            "Google Sheets was updated, but the Databricks pipeline "
+            f"was not triggered. Reason: {job_error}"
+        )
 
     return SheetWriteResponse(
-        success       = True,
+        success=True,
         message=(
-        f"Successfully wrote {rows_to_write} rows to "
-        f"{body.sheet_name.upper()} ({config['tab_name']}). "
-        + (
-            "Pipeline refresh triggered."
-            if job_triggered
-            else "Pipeline refresh not triggered (job ID not configured)."
-        )
-    ),
-        rows_written  = rows_to_write,
-        job_triggered = job_triggered,
+            f"Successfully wrote {rows_to_write} rows to "
+            f"{body.sheet_name.upper()} ({config['tab_name']}). "
+            f"{refresh_message}"
+        ),
+        sheet_name=body.sheet_name,
+        rows_written=rows_to_write,
+        job_triggered=job_triggered,
     )
