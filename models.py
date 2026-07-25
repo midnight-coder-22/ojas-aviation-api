@@ -1,246 +1,104 @@
 # =============================================================================
-# models.py — Pydantic Response Models
-#
-# These models define the exact shape of every API response.
-# Pydantic validates the data coming from Databricks before it is sent
-# to the frontend, catching any type mismatches early.
+# models.py — Pydantic request and response models
 # =============================================================================
 
 from __future__ import annotations
+
 from datetime import date, datetime
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from typing import Optional, Any, Dict, List
+from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class SheetDataResponse(BaseModel):
-    """
-    Response returned by the raw Google Sheets read endpoints.
+# =============================================================================
+# AUTHENTICATION
+# =============================================================================
 
-    headers:
-        Column names from the first row of the worksheet.
-
-    rows:
-        Worksheet data represented as a two-dimensional array.
-        Each inner list represents one Google Sheets row.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    success: bool = True
-    sheet_name: Optional[str] = None
-
-    headers: List[str] = Field(default_factory=list)
-    rows: List[List[Any]] = Field(default_factory=list)
-
-    total_rows: int = 0
-    message: Optional[str] = None
-
-
-class SheetWriteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    sheet_name: str
-    headers: List[str] = Field(default_factory=list)
-    rows: List[List[Any]] = Field(default_factory=list)
-
-
-class SheetWriteResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    success: bool = True
-    message: Optional[str] = None
-    sheet_name: Optional[str] = None
-    rows_written: int = 0
-    job_triggered: bool = False
-
-
-# class LoginRequest(BaseModel):
-#     email: EmailStr
-#     password: str
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-# class LoginResponse(BaseModel):
-#     access_token: str
-#     token_type: str = "bearer"
-#     user_id: Optional[int] = None
-#     email: Optional[EmailStr] = None
+
 class LoginResponse(BaseModel):
     access_token: str
+    token_type: str = "bearer"
+
     user_id: str
     full_name: str
     username: str
     role: str
     department: str
     dashboard_access: str
+
     can_edit_data: bool
     can_flag: bool
     can_resolve_flag: bool
 
 
-class FlagCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+# =============================================================================
+# DASHBOARD
+# =============================================================================
 
-    table_name: Optional[str] = None
-    record_id: Optional[str] = None
-    column_name: Optional[str] = None
-    reason: Optional[str] = None
-    description: Optional[str] = None
-    severity: Optional[str] = None
-    created_by: Optional[str] = None
-
-
-class FlagResolveRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    flag_id: Optional[str] = None
-    resolution: Optional[str] = None
-    resolved_by: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class FlagRecord(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    id: Optional[str] = None
-    flag_id: Optional[str] = None
-    table_name: Optional[str] = None
-    record_id: Optional[str] = None
-    column_name: Optional[str] = None
-    reason: Optional[str] = None
-    description: Optional[str] = None
-    severity: Optional[str] = None
-    status: Optional[str] = None
-    created_by: Optional[str] = None
-    resolved_by: Optional[str] = None
-    resolution: Optional[str] = None
-    created_at: Optional[datetime] = None
-    resolved_at: Optional[datetime] = None
-
-
-# -----------------------------------------------------------------------------
-# Single Work Order KPI record — one row from a department Delta table
-# -----------------------------------------------------------------------------
 class WorkOrderKPI(BaseModel):
-    wo_id:            str                # Work Order ID
-    wo_name:          str                # Item name for dashboard display
-    dept_in_date:     Optional[date]     # Date WO arrived at current department (can be null)
+    """
+    One work-order row returned by a department dashboard endpoint.
+
+    The fields must remain aligned with the columns written by the
+    Databricks department-table refresh pipeline.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    wo_id: str
+    wo_name: str
+
+    dept_in_date: Optional[date] = None
+
+    # Overall work-order target date from OWS.
     wo_target_date: Optional[date] = None
+
+    # Target date for the work order's current dashboard department.
     dept_target_date: Optional[date] = None
-    wo_ageing_days:   Optional[int]      # Total days since WO was opened (null if no start date)
-    dept_ageing_days: Optional[int]      # Days in current department (null if no dept-in date)
-    planned_qty:      int                # Planned production quantity
-    next_dept:        Optional[str]      # Next department in sequence (null if last/none)
-    priority:         str                # Low / Medium / High
-    status:           str                # New / InProcess / Completed
-    expected_steps:   int                # Total expected production steps
-    done_steps:       int                # Steps completed so far
-    qc_alert:         bool               # True → QC inspection required after this dept
-    mi_alert:         bool               # True → Material Issue needed before next dept
-    last_refreshed:   Optional[datetime] = None # Timestamp of last pipeline refresh
 
-    class Config:
-        # Allow instantiation directly from ORM/dict objects
-        from_attributes = True
+    wo_ageing_days: Optional[int] = None
+    dept_ageing_days: Optional[int] = None
 
+    planned_qty: int
 
-# -----------------------------------------------------------------------------
-# Department-level response — wraps the list of WO records with metadata
-# -----------------------------------------------------------------------------
-class DepartmentResponse(BaseModel):
-    department:    str                   # Canonical department name
-    record_count:  int                   # Total WOs in this department
-    data:          list[WorkOrderKPI]    # Full list of WO KPI records
+    next_dept: Optional[str] = None
 
+    priority: str
+    status: str
 
-# -----------------------------------------------------------------------------
-# Lightweight summary — for overview cards without loading all row data
-# -----------------------------------------------------------------------------
-class DepartmentSummary(BaseModel):
-    department:       str
-    total_wos:        int                # Total work orders in department
-    qc_alert_count:   int                # Number of WOs with QC alert active
-    mi_alert_count:   int                # Number of WOs with MI alert active
-    status_breakdown: dict[str, int]     # e.g. { "New": 10, "InProcess": 5, "Completed": 2 }
-    priority_breakdown: dict[str, int]   # e.g. { "Low": 12, "Medium": 3, "High": 2 }
-    last_refreshed:   Optional[datetime]
+    expected_steps: int
+    done_steps: int
 
+    qc_alert: bool
+    mi_alert: bool
 
-# =============================================================================
-# models.py — Pydantic Request and Response Models
-# =============================================================================
+    has_active_flag: bool = False
 
-
-from datetime import date, datetime
-from typing import Optional
-from pydantic import BaseModel
-
-
-# =============================================================================
-# AUTH
-# =============================================================================
-
-class LoginRequest(BaseModel):
-    username:  str       # accepts username OR employee_id
-    password:  str
-
-
-class LoginResponse(BaseModel):
-    access_token:    str
-    token_type:      str = "bearer"
-    user_id:         str
-    full_name:       str
-    username:        str
-    role:            str
-    department:      str
-    dashboard_access: str
-    can_edit_data:   bool
-    can_flag:        bool
-    can_resolve_flag: bool
-
-
-# =============================================================================
-# DASHBOARD — Work Order KPI
-# =============================================================================
-
-class WorkOrderKPI(BaseModel):
-    wo_id:            str
-    wo_name:          str
-    dept_in_date:     Optional[date]
-    dept_target_date: Optional[date] = None
-    wo_ageing_days:   Optional[int]
-    dept_ageing_days: Optional[int]
-    planned_qty:      int
-    next_dept:        Optional[str]
-    priority:         str
-    status:           str
-    expected_steps:   int
-    done_steps:       int
-    qc_alert:         bool
-    mi_alert:         bool
-    has_active_flag:  bool            # True if WO has an unresolved flag
-    last_refreshed:   Optional[datetime]
-
-    class Config:
-        from_attributes = True
+    last_refreshed: Optional[datetime] = None
 
 
 class DepartmentResponse(BaseModel):
-    department:   str
+    department: str
     record_count: int
-    data:         list[WorkOrderKPI]
+    data: list[WorkOrderKPI]
 
 
 class DepartmentSummary(BaseModel):
-    department:         str
-    total_wos:          int
-    qc_alert_count:     int
-    mi_alert_count:     int
-    flagged_count:      int           # WOs with has_active_flag = True
-    status_breakdown:   dict[str, int]
+    department: str
+
+    total_wos: int
+    qc_alert_count: int
+    mi_alert_count: int
+    flagged_count: int = 0
+
+    status_breakdown: dict[str, int]
     priority_breakdown: dict[str, int]
-    last_refreshed:     Optional[datetime]
+
+    last_refreshed: Optional[datetime] = None
 
 
 # =============================================================================
@@ -248,53 +106,54 @@ class DepartmentSummary(BaseModel):
 # =============================================================================
 
 class FlagCreateRequest(BaseModel):
-    wo_ids:     list[str]    # one or more WO IDs to flag in one action
-    item_no:    Optional[str] = None
+    wo_ids: list[str]
+    item_no: Optional[str] = None
     department: str
 
 
 class FlagResolveRequest(BaseModel):
-    wo_ids: list[str]        # one or more WO IDs to resolve in one action
+    wo_ids: list[str]
 
 
 class FlagRecord(BaseModel):
-    sr_no:         Optional[int]
-    wo_id:         str
-    item_no:       Optional[str]
-    department:    str
-    flag_status:   int
-    raised_date:   Optional[datetime]
-    resolved_date: Optional[datetime]
-    raised_by:     Optional[str]
-    resolved_by:   Optional[str]
+    model_config = ConfigDict(from_attributes=True)
 
-    class Config:
-        from_attributes = True
+    sr_no: Optional[int] = None
+    wo_id: str
+    item_no: Optional[str] = None
+    department: str
+    flag_status: int
+
+    raised_date: Optional[datetime] = None
+    resolved_date: Optional[datetime] = None
+
+    raised_by: Optional[str] = None
+    resolved_by: Optional[str] = None
 
 
 # =============================================================================
-# EDIT DATA — Google Sheets Read
+# EDIT DATA — GOOGLE SHEETS
 # =============================================================================
 
 class SheetDataResponse(BaseModel):
-    sheet_name:   str
-    headers:      list[str]
-    rows:         list[list]          # Raw rows as returned from Google Sheets
-    total_rows:   int
+    sheet_name: str
+    headers: list[str] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
+    total_rows: int = 0
 
 
 class SheetWriteRequest(BaseModel):
-    sheet_name:   str                 # "wos" or "ows"
-    headers:      list[str]
-    rows:         list[list]          # Full updated dataset to write back
+    model_config = ConfigDict(extra="forbid")
+
+    sheet_name: str
+    headers: list[str] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
 
 
 class SheetWriteResponse(BaseModel):
-    success:      bool
-    message:      str
-    rows_written: int
-    job_triggered: bool               # Whether Databricks pipeline job was triggered
+    success: bool
+    message: str
 
-
-# ///////////////////////
-
+    sheet_name: Optional[str] = None
+    rows_written: int = 0
+    job_triggered: bool = False
