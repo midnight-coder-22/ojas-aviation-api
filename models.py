@@ -101,6 +101,27 @@ class DepartmentSummary(BaseModel):
     last_refreshed: Optional[datetime] = None
 
 
+class IncomingFlowRow(BaseModel):
+    """
+    Incoming WO counts from one source department,
+    separated by priority.
+    """
+    source_department: str
+    low: int = 0
+    medium: int = 0
+    high: int = 0
+    total: int = 0
+
+
+class IncomingFlowResponse(BaseModel):
+    """
+    Complete incoming-flow KPI response for one target department.
+    """
+    target_department: str
+    total_wos: int
+    data: list[IncomingFlowRow]
+
+
 # =============================================================================
 # FLAGS
 # =============================================================================
