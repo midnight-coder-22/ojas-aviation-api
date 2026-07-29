@@ -2,6 +2,9 @@
 # routers/dashboard.py - Dashboard API Routes
 # =============================================================================
 
+import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 
 from config import settings
@@ -35,6 +38,132 @@ DEPT_TABLE_MAP = {
     "EDM": f"{settings.databricks_schema}.dept_edm",
 }
 
+BUSINESS_TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+STATUS_ALIASES = {
+    "new": "New",
+    "notstarted": "New",
+
+    "inprocess": "Ongoing",
+    "inprogress": "Ongoing",
+    "ongoing": "Ongoing",
+
+    "completed": "Completed",
+    "complete": "Completed",
+    "done": "Completed",
+
+    "overdue": "Overdue",
+}
+
+
+def _to_calendar_date(value: object) -> date | None:
+    """
+    Convert Databricks date/timestamp/string values into a calendar date.
+    Invalid or blank values return None.
+    """
+    if value is None:
+        return None
+
+    # datetime is also a subclass of date, so test it first.
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    normalized = str(value).strip()
+
+    if not normalized:
+        return None
+
+    try:
+        # Supports both YYYY-MM-DD and timestamps beginning with YYYY-MM-DD.
+        return date.fromisoformat(normalized[:10])
+    except ValueError:
+        return None
+
+
+def _normalize_dashboard_status(value: object) -> str:
+    """
+    Map source/display variants into the four canonical dashboard statuses.
+    """
+    status_key = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str(value or "").strip().lower(),
+    )
+
+    # Blank or unsupported source values fall back to New.
+    return STATUS_ALIASES.get(status_key, "New")
+
+
+def _derive_dashboard_status(
+    row: dict,
+    today: date,
+) -> str:
+    """
+    Derive the live dashboard status for one work order.
+
+    Completed takes precedence over the overdue calculation.
+    Either target date being earlier than today makes an active WO overdue.
+    """
+    base_status = _normalize_dashboard_status(
+        row.get("status")
+    )
+
+    if base_status == "Completed":
+        return "Completed"
+
+    if base_status == "Overdue":
+        return "Overdue"
+
+    deadlines = (
+        _to_calendar_date(
+            row.get("wo_target_date")
+        ),
+        _to_calendar_date(
+            row.get("dept_target_date")
+        ),
+    )
+
+    is_overdue = any(
+        deadline is not None and deadline < today
+        for deadline in deadlines
+    )
+
+    if is_overdue:
+        return "Overdue"
+
+    return base_status
+
+
+def _prepare_dashboard_rows(
+    rows: list[dict],
+) -> list[dict]:
+    """
+    Return copied rows containing the live canonical dashboard status.
+    """
+    if not rows:
+        return []
+
+    today = datetime.now(
+        BUSINESS_TIMEZONE
+    ).date()
+
+    prepared_rows: list[dict] = []
+
+    for row in rows:
+        prepared_row = dict(row)
+        prepared_row["status"] = (
+            _derive_dashboard_status(
+                prepared_row,
+                today,
+            )
+        )
+        prepared_rows.append(prepared_row)
+
+    return prepared_rows
+
 
 def _resolve_department(dept_param: str) -> str:
     """Convert a URL department value to its canonical department name."""
@@ -62,6 +191,7 @@ def _build_department_summary(
     rows: list[dict],
 ) -> DepartmentSummary:
     """Build the summary response for one department."""
+    rows = _prepare_dashboard_rows(rows)
     if not rows:
         return DepartmentSummary(
             department=department,
@@ -302,6 +432,7 @@ def get_department_dashboard(
         ORDER BY wo_ageing_days DESC NULLS LAST
         """
     )
+    rows = _prepare_dashboard_rows(raw_rows)
 
     return DepartmentResponse(
         department=resolved_department,
