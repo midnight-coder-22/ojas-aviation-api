@@ -5,6 +5,11 @@
 import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+
+import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from config import settings
@@ -37,6 +42,164 @@ DEPT_TABLE_MAP = {
     "PRODUCTION": f"{settings.databricks_schema}.dept_production",
     "EDM": f"{settings.databricks_schema}.dept_edm",
 }
+
+# Dashboard dates and "today" should follow the business timezone.
+BUSINESS_TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+CANONICAL_STATUS_ORDER = (
+    "New",
+    "Ongoing",
+    "Overdue",
+    "Completed",
+)
+
+STATUS_ALIASES = {
+    "new": "New",
+    "notstarted": "New",
+
+    "ongoing": "Ongoing",
+    "inprocess": "Ongoing",
+    "inprogress": "Ongoing",
+
+    "overdue": "Overdue",
+
+    "completed": "Completed",
+    "complete": "Completed",
+    "done": "Completed",
+}
+
+
+def _to_calendar_date(value: object) -> date | None:
+    """
+    Convert a Databricks date, timestamp or ISO-style string into a date.
+
+    Blank or invalid values return None.
+    """
+    if value is None:
+        return None
+
+    # datetime must be checked before date because datetime inherits date.
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(
+                BUSINESS_TIMEZONE
+            ).date()
+
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    normalized = str(value).strip()
+
+    if not normalized:
+        return None
+
+    try:
+        # Supports YYYY-MM-DD as well as timestamps beginning with that date.
+        return date.fromisoformat(
+            normalized[:10]
+        )
+    except ValueError:
+        return None
+
+
+def _normalize_dashboard_status(
+    value: object,
+) -> str:
+    """
+    Convert source status variants into the four dashboard statuses.
+    """
+    status_key = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str(value or "").strip().lower(),
+    )
+
+    # Unsupported or blank source values default to New.
+    return STATUS_ALIASES.get(
+        status_key,
+        "New",
+    )
+
+
+def _derive_dashboard_status(
+    row: dict,
+    today: date,
+) -> str:
+    """
+    Derive the live status of one work order.
+
+    Rules:
+    - Completed remains Completed.
+    - An existing Overdue value remains Overdue.
+    - Any active WO with either target date earlier than today is Overdue.
+    - Otherwise, New/InProcess values become New/Ongoing.
+    """
+    base_status = _normalize_dashboard_status(
+        row.get("status")
+    )
+
+    # Completed takes precedence over historical deadlines.
+    if base_status == "Completed":
+        return "Completed"
+
+    if base_status == "Overdue":
+        return "Overdue"
+
+    wo_target_date = _to_calendar_date(
+        row.get("wo_target_date")
+    )
+
+    dept_target_date = _to_calendar_date(
+        row.get("dept_target_date")
+    )
+
+    has_expired_deadline = any(
+        target_date is not None
+        and target_date < today
+        for target_date in (
+            wo_target_date,
+            dept_target_date,
+        )
+    )
+
+    if has_expired_deadline:
+        return "Overdue"
+
+    return base_status
+
+
+def _prepare_dashboard_rows(
+    rows: list[dict],
+) -> list[dict]:
+    """
+    Return copied rows containing their derived dashboard statuses.
+    """
+    if not rows:
+        return []
+
+    today = datetime.now(
+        BUSINESS_TIMEZONE
+    ).date()
+
+    prepared_rows: list[dict] = []
+
+    for row in rows:
+        prepared_row = dict(row)
+
+        prepared_row["status"] = (
+            _derive_dashboard_status(
+                prepared_row,
+                today,
+            )
+        )
+
+        prepared_rows.append(
+            prepared_row
+        )
+
+    return prepared_rows
 
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
@@ -191,6 +354,8 @@ def _build_department_summary(
     rows: list[dict],
 ) -> DepartmentSummary:
     """Build the summary response for one department."""
+
+    # Apply the same status rules used by the detailed endpoint.
     rows = _prepare_dashboard_rows(rows)
     if not rows:
         return DepartmentSummary(
@@ -199,8 +364,8 @@ def _build_department_summary(
             qc_alert_count=0,
             mi_alert_count=0,
             flagged_count=0,
-            status_breakdown={},
-            priority_breakdown={},
+            status_breakdown={status: 0 for status in CANONICAL_STATUS_ORDER},
+            priority_breakdown={"Low": 0, "Medium": 0, "High": 0,},
             last_refreshed=None,
         )
 
@@ -214,8 +379,16 @@ def _build_department_summary(
         1 for row in rows if bool(row.get("has_active_flag"))
     )
 
-    status_breakdown: dict[str, int] = {}
-    priority_breakdown: dict[str, int] = {}
+    status_breakdown: dict[str, int] = {
+    status: 0
+    for status in CANONICAL_STATUS_ORDER
+    }
+
+    priority_breakdown: dict[str, int] = {
+        "Low": 0,
+        "Medium": 0,
+        "High": 0,
+    }
 
     for row in rows:
         status = str(row.get("status") or "Unknown").strip() or "Unknown"
@@ -425,12 +598,18 @@ def get_department_dashboard(
     resolved_department = _resolve_department(department)
     table_name = DEPT_TABLE_MAP[resolved_department]
 
-    rows = fetch_all(
-        f"""
-        SELECT *
-        FROM {table_name}
-        ORDER BY wo_ageing_days DESC NULLS LAST
-        """
+    raw_rows = fetch_all(
+    f"""
+    SELECT *
+    FROM {table_name}
+    ORDER BY wo_ageing_days DESC NULLS LAST
+    """
+    )
+
+    # The detailed endpoint must return the derived status because both the
+    # table and the Status chart consume these rows.
+    rows = _prepare_dashboard_rows(
+    raw_rows
     )
     rows = _prepare_dashboard_rows(raw_rows)
 
