@@ -29,7 +29,6 @@ class LoginResponse(BaseModel):
     role: str
     department: str
     dashboard_access: str
-
     can_edit_data: bool
     can_flag: bool
     can_resolve_flag: bool
@@ -40,44 +39,26 @@ class LoginResponse(BaseModel):
 # =============================================================================
 
 class WorkOrderKPI(BaseModel):
-    """
-    One work-order row returned by a department dashboard endpoint.
-
-    The fields must remain aligned with the columns written by the
-    Databricks department-table refresh pipeline.
-    """
+    """One work-order row returned by a department dashboard endpoint."""
 
     model_config = ConfigDict(from_attributes=True)
 
     wo_id: str
     wo_name: str
-
     dept_in_date: Optional[date] = None
-
-    # Overall work-order target date from OWS.
     wo_target_date: Optional[date] = None
-
-    # Target date for the work order's current dashboard department.
     dept_target_date: Optional[date] = None
-
     wo_ageing_days: Optional[int] = None
     dept_ageing_days: Optional[int] = None
-
     planned_qty: int
-
     next_dept: Optional[str] = None
-
     priority: str
     status: str
-
     expected_steps: int
     done_steps: int
-
     qc_alert: bool
     mi_alert: bool
-
     has_active_flag: bool = False
-
     last_refreshed: Optional[datetime] = None
 
 
@@ -89,23 +70,18 @@ class DepartmentResponse(BaseModel):
 
 class DepartmentSummary(BaseModel):
     department: str
-
     total_wos: int
     qc_alert_count: int
     mi_alert_count: int
     flagged_count: int = 0
-
     status_breakdown: dict[str, int]
     priority_breakdown: dict[str, int]
-
     last_refreshed: Optional[datetime] = None
 
 
 class IncomingFlowRow(BaseModel):
-    """
-    Incoming WO counts from one source department,
-    separated by priority.
-    """
+    """Incoming WO counts from one source department by priority."""
+
     source_department: str
     low: int = 0
     medium: int = 0
@@ -113,13 +89,24 @@ class IncomingFlowRow(BaseModel):
     total: int = 0
 
 
+class IncomingWorkOrder(WorkOrderKPI):
+    """A detailed work order that is moving into the target department."""
+
+    source_department: str
+
+
 class IncomingFlowResponse(BaseModel):
     """
-    Complete incoming-flow KPI response for one target department.
+    Incoming-flow chart totals plus row-level data for the popup dashboard.
+
+    The frontend receives both parts in the same request, so opening and using
+    the popup never needs another API call.
     """
+
     target_department: str
     total_wos: int
     data: list[IncomingFlowRow]
+    work_orders: list[IncomingWorkOrder] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -144,10 +131,8 @@ class FlagRecord(BaseModel):
     item_no: Optional[str] = None
     department: str
     flag_status: int
-
     raised_date: Optional[datetime] = None
     resolved_date: Optional[datetime] = None
-
     raised_by: Optional[str] = None
     resolved_by: Optional[str] = None
 
@@ -174,7 +159,6 @@ class SheetWriteRequest(BaseModel):
 class SheetWriteResponse(BaseModel):
     success: bool
     message: str
-
     sheet_name: Optional[str] = None
     rows_written: int = 0
     job_triggered: bool = False

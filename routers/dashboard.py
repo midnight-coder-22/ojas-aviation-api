@@ -20,6 +20,7 @@ from models import (
     DepartmentSummary,
     IncomingFlowResponse,
     IncomingFlowRow,
+    IncomingWorkOrder,
     WorkOrderKPI,
 )
 
@@ -415,8 +416,10 @@ def _build_incoming_flow_query(
     target_department: str,
 ) -> tuple[str, list[str]]:
     """
-    Search all other department tables for work orders whose next_dept is the
-    selected target department, then group distinct WOs by source and priority.
+    Return every distinct work order incoming to the selected department.
+
+    The same query also resolves the live active-flag state. The API therefore
+    returns chart totals and popup rows in one request.
     """
     union_parts: list[str] = []
     params: list[str] = []
@@ -426,50 +429,98 @@ def _build_incoming_flow_query(
             continue
 
         table_name = DEPT_TABLE_MAP[source_department]
-
         union_parts.append(
             f"""
             SELECT
                 '{source_department}' AS source_department,
-                CAST(wo_id AS STRING) AS wo_id,
-                CASE
-                    WHEN LOWER(TRIM(COALESCE(priority, 'Low'))) = 'high'
-                        THEN 3
-                    WHEN LOWER(TRIM(COALESCE(priority, 'Low'))) = 'medium'
-                        THEN 2
-                    ELSE 1
-                END AS priority_rank
-            FROM {table_name}
-            WHERE UPPER(TRIM(COALESCE(next_dept, ''))) = ?
-              AND wo_id IS NOT NULL
-              AND TRIM(CAST(wo_id AS STRING)) <> ''
+                CAST(source_rows.wo_id AS STRING) AS wo_id,
+                CAST(source_rows.wo_name AS STRING) AS wo_name,
+                source_rows.dept_in_date,
+                source_rows.wo_target_date,
+                source_rows.dept_target_date,
+                source_rows.wo_ageing_days,
+                source_rows.dept_ageing_days,
+                source_rows.planned_qty,
+                CAST(source_rows.next_dept AS STRING) AS next_dept,
+                CAST(source_rows.priority AS STRING) AS priority,
+                CAST(source_rows.status AS STRING) AS status,
+                source_rows.expected_steps,
+                source_rows.done_steps,
+                source_rows.qc_alert,
+                source_rows.mi_alert,
+                COALESCE(
+                    active_flags.has_active_flag,
+                    CAST(source_rows.has_active_flag AS BOOLEAN),
+                    FALSE
+                ) AS has_active_flag,
+                source_rows.last_refreshed
+            FROM {table_name} AS source_rows
+            LEFT JOIN active_flags
+              ON active_flags.wo_id = CAST(source_rows.wo_id AS STRING)
+            WHERE UPPER(TRIM(COALESCE(source_rows.next_dept, ''))) = ?
+              AND source_rows.wo_id IS NOT NULL
+              AND TRIM(CAST(source_rows.wo_id AS STRING)) <> ''
             """
         )
         params.append(target_department)
 
     union_sql = "\nUNION ALL\n".join(union_parts)
+    flags_table = f"{settings.databricks_schema}.flags"
 
     query = f"""
-        WITH incoming_raw AS (
+        WITH active_flags AS (
+            SELECT
+                CAST(wo_id AS STRING) AS wo_id,
+                CASE
+                    WHEN MAX(
+                        CASE
+                            WHEN CAST(flag_status AS INT) = 1 THEN 1
+                            ELSE 0
+                        END
+                    ) = 1 THEN TRUE
+                    ELSE FALSE
+                END AS has_active_flag
+            FROM {flags_table}
+            WHERE wo_id IS NOT NULL
+            GROUP BY CAST(wo_id AS STRING)
+        ),
+        incoming_raw AS (
             {union_sql}
         ),
-        incoming_deduplicated AS (
+        incoming_ranked AS (
             SELECT
-                source_department,
-                wo_id,
-                MAX(priority_rank) AS priority_rank
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY source_department, wo_id
+                    ORDER BY last_refreshed DESC NULLS LAST
+                ) AS row_number
             FROM incoming_raw
-            GROUP BY source_department, wo_id
         )
         SELECT
             source_department,
-            SUM(CASE WHEN priority_rank = 1 THEN 1 ELSE 0 END) AS low,
-            SUM(CASE WHEN priority_rank = 2 THEN 1 ELSE 0 END) AS medium,
-            SUM(CASE WHEN priority_rank = 3 THEN 1 ELSE 0 END) AS high,
-            COUNT(*) AS total
-        FROM incoming_deduplicated
-        GROUP BY source_department
-        ORDER BY total DESC, source_department
+            wo_id,
+            wo_name,
+            dept_in_date,
+            wo_target_date,
+            dept_target_date,
+            wo_ageing_days,
+            dept_ageing_days,
+            planned_qty,
+            next_dept,
+            priority,
+            status,
+            expected_steps,
+            done_steps,
+            qc_alert,
+            mi_alert,
+            has_active_flag,
+            last_refreshed
+        FROM incoming_ranked
+        WHERE row_number = 1
+        ORDER BY
+            source_department,
+            wo_ageing_days DESC NULLS LAST,
+            wo_id
     """
 
     return query, params
@@ -537,7 +588,7 @@ def get_department_summary(
 @router.get(
     "/dashboard/{department}/incoming-flow",
     response_model=IncomingFlowResponse,
-    summary="Get incoming work orders by source department and priority",
+    summary="Get incoming work orders and source-department priority totals",
 )
 def get_incoming_flow(
     department: str,
@@ -545,25 +596,43 @@ def get_incoming_flow(
 ):
     target_department = _resolve_department(department)
     query, params = _build_incoming_flow_query(target_department)
-    rows = fetch_all(query, params)
+    raw_rows = fetch_all(query, params)
 
-    rows_by_source = {
-        str(row.get("source_department") or "").strip().upper(): row
-        for row in rows
+    # Apply the same live status derivation used by the normal department route.
+    prepared_rows = _prepare_dashboard_rows(raw_rows)
+    work_orders = [
+        IncomingWorkOrder(**row)
+        for row in prepared_rows
+    ]
+
+    counts_by_source = {
+        source_department: {
+            "low": 0,
+            "medium": 0,
+            "high": 0,
+        }
+        for source_department in DEPARTMENTS
+        if source_department != target_department
     }
+
+    for work_order in work_orders:
+        source_counts = counts_by_source.setdefault(
+            work_order.source_department,
+            {"low": 0, "medium": 0, "high": 0},
+        )
+        priority_key = str(work_order.priority or "Low").strip().lower()
+
+        if priority_key not in source_counts:
+            priority_key = "low"
+
+        source_counts[priority_key] += 1
 
     response_rows: list[IncomingFlowRow] = []
 
-    for source_department in DEPARTMENTS:
-        if source_department == target_department:
-            continue
-
-        row = rows_by_source.get(source_department, {})
-
-        low = int(row.get("low") or 0)
-        medium = int(row.get("medium") or 0)
-        high = int(row.get("high") or 0)
-        total = int(row.get("total") or 0)
+    for source_department, priority_counts in counts_by_source.items():
+        low = int(priority_counts["low"])
+        medium = int(priority_counts["medium"])
+        high = int(priority_counts["high"])
 
         response_rows.append(
             IncomingFlowRow(
@@ -571,7 +640,7 @@ def get_incoming_flow(
                 low=low,
                 medium=medium,
                 high=high,
-                total=total,
+                total=low + medium + high,
             )
         )
 
@@ -581,9 +650,11 @@ def get_incoming_flow(
 
     return IncomingFlowResponse(
         target_department=target_department,
-        total_wos=sum(item.total for item in response_rows),
+        total_wos=len(work_orders),
         data=response_rows,
+        work_orders=work_orders,
     )
+
 
 
 @router.get(
