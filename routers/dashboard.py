@@ -110,32 +110,36 @@ def _derive_dashboard_status(row: dict, today: date) -> str:
     """
     Derive the live dashboard status.
 
-    Rules:
-    - If Dept Due Dt is before today, status is Delayed.
-    - Otherwise Completed remains Completed.
-    - Existing Delayed stays Delayed.
-    - If Dept Due Dt has not passed but the source status is Overdue, keep Overdue.
-    - If Dept Due Dt has not passed but WO Due Dt is before today, use Overdue.
-    - Otherwise New/InProcess-style values resolve to New/Ongoing.
+    Deadline precedence:
+    1. If WO Due Dt is before today -> Overdue.
+    2. Else if Dept Due Dt is before today -> Delayed.
+    3. Otherwise preserve the normal canonical source status.
+
+    Overdue always takes precedence over Delayed.
     """
     base_status = _normalize_dashboard_status(row.get("status"))
 
+    # Overall work-order deadline has highest precedence.
+    wo_due_date = _to_calendar_date(row.get("wo_target_date"))
+
+    if wo_due_date is not None and wo_due_date < today:
+        return "Overdue"
+
+    # Department deadline is considered only while
+    # the overall WO deadline has not passed.
     dept_due_date = _to_calendar_date(row.get("dept_target_date"))
+
     if dept_due_date is not None and dept_due_date < today:
         return "Delayed"
 
     if base_status == "Completed":
         return "Completed"
 
-    if base_status == "Delayed":
-        return "Delayed"
-
     if base_status == "Overdue":
         return "Overdue"
 
-    wo_due_date = _to_calendar_date(row.get("wo_target_date"))
-    if wo_due_date is not None and wo_due_date < today:
-        return "Overdue"
+    if base_status == "Delayed":
+        return "Delayed"
 
     return base_status
 
