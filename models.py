@@ -1,5 +1,5 @@
 # =============================================================================
-# models.py — Pydantic request and response models
+# models.py - Pydantic request and response models
 # =============================================================================
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-
     user_id: str
     full_name: str
     username: str
@@ -44,6 +43,7 @@ class WorkOrderKPI(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     wo_id: str
+    item_no: Optional[str] = None
     wo_name: str
     dept_in_date: Optional[date] = None
     wo_target_date: Optional[date] = None
@@ -96,12 +96,7 @@ class IncomingWorkOrder(WorkOrderKPI):
 
 
 class IncomingFlowResponse(BaseModel):
-    """
-    Incoming-flow chart totals plus row-level data for the popup dashboard.
-
-    The frontend receives both parts in the same request, so opening and using
-    the popup never needs another API call.
-    """
+    """Incoming-flow chart totals plus row-level popup data."""
 
     target_department: str
     total_wos: int
@@ -138,7 +133,7 @@ class FlagRecord(BaseModel):
 
 
 # =============================================================================
-# EDIT DATA — GOOGLE SHEETS
+# EDIT DATA - GOOGLE SHEETS
 # =============================================================================
 
 class SheetDataResponse(BaseModel):

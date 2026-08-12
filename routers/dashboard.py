@@ -6,10 +6,6 @@ import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import re
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from config import settings
@@ -25,6 +21,11 @@ from models import (
 )
 
 router = APIRouter(prefix="/api", tags=["Dashboard"])
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
 DEPARTMENTS = [
     "CNC",
@@ -44,12 +45,12 @@ DEPT_TABLE_MAP = {
     "EDM": f"{settings.databricks_schema}.dept_edm",
 }
 
-# Dashboard dates and "today" should follow the business timezone.
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 CANONICAL_STATUS_ORDER = (
     "New",
     "Ongoing",
+    "Delayed",
     "Overdue",
     "Completed",
 )
@@ -57,277 +58,110 @@ CANONICAL_STATUS_ORDER = (
 STATUS_ALIASES = {
     "new": "New",
     "notstarted": "New",
-
     "ongoing": "Ongoing",
     "inprocess": "Ongoing",
     "inprogress": "Ongoing",
-
+    "delayed": "Delayed",
     "overdue": "Overdue",
-
     "completed": "Completed",
     "complete": "Completed",
     "done": "Completed",
 }
 
 
-def _to_calendar_date(value: object) -> date | None:
-    """
-    Convert a Databricks date, timestamp or ISO-style string into a date.
+# =============================================================================
+# STATUS HELPERS
+# =============================================================================
 
-    Blank or invalid values return None.
-    """
+def _to_calendar_date(value: object) -> date | None:
+    """Convert Databricks date/timestamp/string values into a calendar date."""
     if value is None:
         return None
 
-    # datetime must be checked before date because datetime inherits date.
     if isinstance(value, datetime):
         if value.tzinfo is not None:
-            return value.astimezone(
-                BUSINESS_TIMEZONE
-            ).date()
-
+            return value.astimezone(BUSINESS_TIMEZONE).date()
         return value.date()
 
     if isinstance(value, date):
         return value
 
     normalized = str(value).strip()
-
     if not normalized:
         return None
 
     try:
-        # Supports YYYY-MM-DD as well as timestamps beginning with that date.
-        return date.fromisoformat(
-            normalized[:10]
-        )
-    except ValueError:
-        return None
-
-
-def _normalize_dashboard_status(
-    value: object,
-) -> str:
-    """
-    Convert source status variants into the four dashboard statuses.
-    """
-    status_key = re.sub(
-        r"[^a-z0-9]+",
-        "",
-        str(value or "").strip().lower(),
-    )
-
-    # Unsupported or blank source values default to New.
-    return STATUS_ALIASES.get(
-        status_key,
-        "New",
-    )
-
-
-def _derive_dashboard_status(
-    row: dict,
-    today: date,
-) -> str:
-    """
-    Derive the live status of one work order.
-
-    Rules:
-    - Completed remains Completed.
-    - An existing Overdue value remains Overdue.
-    - Any active WO with either target date earlier than today is Overdue.
-    - Otherwise, New/InProcess values become New/Ongoing.
-    """
-    base_status = _normalize_dashboard_status(
-        row.get("status")
-    )
-
-    # Completed takes precedence over historical deadlines.
-    if base_status == "Completed":
-        return "Completed"
-
-    if base_status == "Overdue":
-        return "Overdue"
-
-    wo_target_date = _to_calendar_date(
-        row.get("wo_target_date")
-    )
-
-    dept_target_date = _to_calendar_date(
-        row.get("dept_target_date")
-    )
-
-    has_expired_deadline = any(
-        target_date is not None
-        and target_date < today
-        for target_date in (
-            wo_target_date,
-            dept_target_date,
-        )
-    )
-
-    if has_expired_deadline:
-        return "Overdue"
-
-    return base_status
-
-
-def _prepare_dashboard_rows(
-    rows: list[dict],
-) -> list[dict]:
-    """
-    Return copied rows containing their derived dashboard statuses.
-    """
-    if not rows:
-        return []
-
-    today = datetime.now(
-        BUSINESS_TIMEZONE
-    ).date()
-
-    prepared_rows: list[dict] = []
-
-    for row in rows:
-        prepared_row = dict(row)
-
-        prepared_row["status"] = (
-            _derive_dashboard_status(
-                prepared_row,
-                today,
-            )
-        )
-
-        prepared_rows.append(
-            prepared_row
-        )
-
-    return prepared_rows
-
-BUSINESS_TIMEZONE = ZoneInfo("Asia/Kolkata")
-
-STATUS_ALIASES = {
-    "new": "New",
-    "notstarted": "New",
-
-    "inprocess": "Ongoing",
-    "inprogress": "Ongoing",
-    "ongoing": "Ongoing",
-
-    "completed": "Completed",
-    "complete": "Completed",
-    "done": "Completed",
-
-    "overdue": "Overdue",
-}
-
-
-def _to_calendar_date(value: object) -> date | None:
-    """
-    Convert Databricks date/timestamp/string values into a calendar date.
-    Invalid or blank values return None.
-    """
-    if value is None:
-        return None
-
-    # datetime is also a subclass of date, so test it first.
-    if isinstance(value, datetime):
-        return value.date()
-
-    if isinstance(value, date):
-        return value
-
-    normalized = str(value).strip()
-
-    if not normalized:
-        return None
-
-    try:
-        # Supports both YYYY-MM-DD and timestamps beginning with YYYY-MM-DD.
         return date.fromisoformat(normalized[:10])
     except ValueError:
         return None
 
 
 def _normalize_dashboard_status(value: object) -> str:
-    """
-    Map source/display variants into the four canonical dashboard statuses.
-    """
+    """Map source/display variants into canonical dashboard statuses."""
     status_key = re.sub(
         r"[^a-z0-9]+",
         "",
         str(value or "").strip().lower(),
     )
-
-    # Blank or unsupported source values fall back to New.
     return STATUS_ALIASES.get(status_key, "New")
 
 
-def _derive_dashboard_status(
-    row: dict,
-    today: date,
-) -> str:
+def _derive_dashboard_status(row: dict, today: date) -> str:
     """
-    Derive the live dashboard status for one work order.
+    Derive the live dashboard status.
 
-    Completed takes precedence over the overdue calculation.
-    Either target date being earlier than today makes an active WO overdue.
+    Rules:
+    - If Dept Due Dt is before today, status is Delayed.
+    - Otherwise Completed remains Completed.
+    - Existing Delayed stays Delayed.
+    - If Dept Due Dt has not passed but the source status is Overdue, keep Overdue.
+    - If Dept Due Dt has not passed but WO Due Dt is before today, use Overdue.
+    - Otherwise New/InProcess-style values resolve to New/Ongoing.
     """
-    base_status = _normalize_dashboard_status(
-        row.get("status")
-    )
+    base_status = _normalize_dashboard_status(row.get("status"))
+
+    dept_due_date = _to_calendar_date(row.get("dept_target_date"))
+    if dept_due_date is not None and dept_due_date < today:
+        return "Delayed"
 
     if base_status == "Completed":
         return "Completed"
 
+    if base_status == "Delayed":
+        return "Delayed"
+
     if base_status == "Overdue":
         return "Overdue"
 
-    deadlines = (
-        _to_calendar_date(
-            row.get("wo_target_date")
-        ),
-        _to_calendar_date(
-            row.get("dept_target_date")
-        ),
-    )
-
-    is_overdue = any(
-        deadline is not None and deadline < today
-        for deadline in deadlines
-    )
-
-    if is_overdue:
+    wo_due_date = _to_calendar_date(row.get("wo_target_date"))
+    if wo_due_date is not None and wo_due_date < today:
         return "Overdue"
 
     return base_status
 
 
-def _prepare_dashboard_rows(
-    rows: list[dict],
-) -> list[dict]:
-    """
-    Return copied rows containing the live canonical dashboard status.
-    """
+def _prepare_dashboard_rows(rows: list[dict]) -> list[dict]:
+    """Return copied rows containing the live canonical dashboard status."""
     if not rows:
         return []
 
-    today = datetime.now(
-        BUSINESS_TIMEZONE
-    ).date()
-
+    today = datetime.now(BUSINESS_TIMEZONE).date()
     prepared_rows: list[dict] = []
 
     for row in rows:
         prepared_row = dict(row)
-        prepared_row["status"] = (
-            _derive_dashboard_status(
-                prepared_row,
-                today,
-            )
+        prepared_row["status"] = _derive_dashboard_status(
+            prepared_row,
+            today,
         )
         prepared_rows.append(prepared_row)
 
     return prepared_rows
 
+
+# =============================================================================
+# DEPARTMENT HELPERS
+# =============================================================================
 
 def _resolve_department(dept_param: str) -> str:
     """Convert a URL department value to its canonical department name."""
@@ -355,62 +189,67 @@ def _build_department_summary(
     rows: list[dict],
 ) -> DepartmentSummary:
     """Build the summary response for one department."""
+    prepared_rows = _prepare_dashboard_rows(rows)
 
-    # Apply the same status rules used by the detailed endpoint.
-    rows = _prepare_dashboard_rows(rows)
-    if not rows:
+    if not prepared_rows:
         return DepartmentSummary(
             department=department,
             total_wos=0,
             qc_alert_count=0,
             mi_alert_count=0,
             flagged_count=0,
-            status_breakdown={status: 0 for status in CANONICAL_STATUS_ORDER},
-            priority_breakdown={"Low": 0, "Medium": 0, "High": 0,},
+            status_breakdown={
+                status: 0 for status in CANONICAL_STATUS_ORDER
+            },
+            priority_breakdown={
+                "Low": 0,
+                "Medium": 0,
+                "High": 0,
+            },
             last_refreshed=None,
         )
 
     qc_alert_count = sum(
-        1 for row in rows if bool(row.get("qc_alert"))
+        1 for row in prepared_rows if bool(row.get("qc_alert"))
     )
     mi_alert_count = sum(
-        1 for row in rows if bool(row.get("mi_alert"))
+        1 for row in prepared_rows if bool(row.get("mi_alert"))
     )
     flagged_count = sum(
-        1 for row in rows if bool(row.get("has_active_flag"))
+        1 for row in prepared_rows if bool(row.get("has_active_flag"))
     )
 
     status_breakdown: dict[str, int] = {
-    status: 0
-    for status in CANONICAL_STATUS_ORDER
+        status: 0 for status in CANONICAL_STATUS_ORDER
     }
-
     priority_breakdown: dict[str, int] = {
         "Low": 0,
         "Medium": 0,
         "High": 0,
     }
 
-    for row in rows:
-        status = str(row.get("status") or "Unknown").strip() or "Unknown"
+    for row in prepared_rows:
+        status = str(row.get("status") or "New").strip() or "New"
         priority = str(row.get("priority") or "Low").strip() or "Low"
 
         status_breakdown[status] = status_breakdown.get(status, 0) + 1
-        priority_breakdown[priority] = (
-            priority_breakdown.get(priority, 0) + 1
-        )
+        priority_breakdown[priority] = priority_breakdown.get(priority, 0) + 1
 
     return DepartmentSummary(
         department=department,
-        total_wos=len(rows),
+        total_wos=len(prepared_rows),
         qc_alert_count=qc_alert_count,
         mi_alert_count=mi_alert_count,
         flagged_count=flagged_count,
         status_breakdown=status_breakdown,
         priority_breakdown=priority_breakdown,
-        last_refreshed=rows[0].get("last_refreshed"),
+        last_refreshed=prepared_rows[0].get("last_refreshed"),
     )
 
+
+# =============================================================================
+# INCOMING FLOW
+# =============================================================================
 
 def _build_incoming_flow_query(
     target_department: str,
@@ -418,8 +257,8 @@ def _build_incoming_flow_query(
     """
     Return every distinct work order incoming to the selected department.
 
-    The same query also resolves the live active-flag state. The API therefore
-    returns chart totals and popup rows in one request.
+    The same query resolves the live active-flag state so the frontend can
+    populate the incoming chart and popup from one API request.
     """
     union_parts: list[str] = []
     params: list[str] = []
@@ -434,6 +273,7 @@ def _build_incoming_flow_query(
             SELECT
                 '{source_department}' AS source_department,
                 CAST(source_rows.wo_id AS STRING) AS wo_id,
+                CAST(source_rows.item_no AS STRING) AS item_no,
                 CAST(source_rows.wo_name AS STRING) AS wo_name,
                 source_rows.dept_in_date,
                 source_rows.wo_target_date,
@@ -499,6 +339,7 @@ def _build_incoming_flow_query(
         SELECT
             source_department,
             wo_id,
+            item_no,
             wo_name,
             dept_in_date,
             wo_target_date,
@@ -527,7 +368,7 @@ def _build_incoming_flow_query(
 
 
 # =============================================================================
-# STATIC ROUTES
+# ROUTES
 # =============================================================================
 
 @router.get(
@@ -561,11 +402,6 @@ def get_all_departments_summary(
     return summaries
 
 
-# =============================================================================
-# DYNAMIC ROUTES
-# Keep the generic /dashboard/{department} route last.
-# =============================================================================
-
 @router.get(
     "/dashboard/{department}/summary",
     response_model=DepartmentSummary,
@@ -597,9 +433,8 @@ def get_incoming_flow(
     target_department = _resolve_department(department)
     query, params = _build_incoming_flow_query(target_department)
     raw_rows = fetch_all(query, params)
-
-    # Apply the same live status derivation used by the normal department route.
     prepared_rows = _prepare_dashboard_rows(raw_rows)
+
     work_orders = [
         IncomingWorkOrder(**row)
         for row in prepared_rows
@@ -620,7 +455,9 @@ def get_incoming_flow(
             work_order.source_department,
             {"low": 0, "medium": 0, "high": 0},
         )
-        priority_key = str(work_order.priority or "Low").strip().lower()
+        priority_key = str(
+            work_order.priority or "Low"
+        ).strip().lower()
 
         if priority_key not in source_counts:
             priority_key = "low"
@@ -656,7 +493,6 @@ def get_incoming_flow(
     )
 
 
-
 @router.get(
     "/dashboard/{department}",
     response_model=DepartmentResponse,
@@ -670,17 +506,11 @@ def get_department_dashboard(
     table_name = DEPT_TABLE_MAP[resolved_department]
 
     raw_rows = fetch_all(
-    f"""
-    SELECT *
-    FROM {table_name}
-    ORDER BY wo_ageing_days DESC NULLS LAST
-    """
-    )
-
-    # The detailed endpoint must return the derived status because both the
-    # table and the Status chart consume these rows.
-    rows = _prepare_dashboard_rows(
-    raw_rows
+        f"""
+        SELECT *
+        FROM {table_name}
+        ORDER BY wo_ageing_days DESC NULLS LAST
+        """
     )
     rows = _prepare_dashboard_rows(raw_rows)
 
