@@ -119,26 +119,12 @@ def _derive_dashboard_status(row: dict, today: date) -> str:
     """
     base_status = _normalize_dashboard_status(row.get("status"))
 
-    # Overall work-order deadline has highest precedence.
     wo_due_date = _to_calendar_date(row.get("wo_target_date"))
-
     if wo_due_date is not None and wo_due_date < today:
         return "Overdue"
 
-    # Department deadline is considered only while
-    # the overall WO deadline has not passed.
     dept_due_date = _to_calendar_date(row.get("dept_target_date"))
-
     if dept_due_date is not None and dept_due_date < today:
-        return "Delayed"
-
-    if base_status == "Completed":
-        return "Completed"
-
-    if base_status == "Overdue":
-        return "Overdue"
-
-    if base_status == "Delayed":
         return "Delayed"
 
     return base_status
@@ -278,6 +264,7 @@ def _build_incoming_flow_query(
                 '{source_department}' AS source_department,
                 CAST(source_rows.wo_id AS STRING) AS wo_id,
                 CAST(source_rows.item_no AS STRING) AS item_no,
+                CAST(source_rows.item_code AS STRING) AS item_code,
                 CAST(source_rows.wo_name AS STRING) AS wo_name,
                 source_rows.dept_in_date,
                 source_rows.wo_target_date,
@@ -344,6 +331,7 @@ def _build_incoming_flow_query(
             source_department,
             wo_id,
             item_no,
+            item_code,
             wo_name,
             dept_in_date,
             wo_target_date,

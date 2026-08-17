@@ -44,6 +44,7 @@ class WorkOrderKPI(BaseModel):
 
     wo_id: str
     item_no: Optional[str] = None
+    item_code: Optional[str] = None
     wo_name: str
     dept_in_date: Optional[date] = None
     wo_target_date: Optional[date] = None
