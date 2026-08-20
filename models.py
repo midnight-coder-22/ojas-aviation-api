@@ -158,3 +158,10 @@ class SheetWriteResponse(BaseModel):
     sheet_name: Optional[str] = None
     rows_written: int = 0
     job_triggered: bool = False
+
+
+class PostDataResponse(BaseModel):
+    success: bool
+    message: str
+    job_triggered: bool = False
+    run_id: Optional[int] = None
