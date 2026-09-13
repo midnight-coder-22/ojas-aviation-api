@@ -83,38 +83,53 @@ def raise_flags(
     user: dict = Depends(require_permission("can_flag")),
 ):
     """
-    Insert flag rows for each WO ID in the request.
-    Each WO gets its own row in the flags table with flag_status = 1.
-    If a WO already has an active flag it is skipped (idempotent).
+    Insert flag rows for the WO IDs in the request, in a single batch.
+    Each new WO gets its own row in the flags table with flag_status = 1.
+    A WO that already has an active flag is skipped (idempotent).
     """
-    if not body.wo_ids:
+    wo_ids = list(dict.fromkeys(body.wo_ids))  # de-duplicate, keep order
+
+    if not wo_ids:
         raise HTTPException(status_code=400, detail="wo_ids cannot be empty.")
 
     now       = datetime.now(timezone.utc).isoformat()
     raised_by = user.get("username", "unknown")
-    inserted  = []
-    skipped   = []
 
-    for wo_id in body.wo_ids:
-        # Check if this WO already has an active flag
-        existing = fetch_all(
-            f"SELECT sr_no FROM {SCHEMA}.flags WHERE wo_id = ? AND flag_status = 1 LIMIT 1",
-            [wo_id],
-        )
-        if existing:
-            skipped.append(wo_id)
-            continue
+    # One query to find which of the requested WOs already have an active
+    # flag, instead of one query per WO.
+    placeholders = ", ".join(["?"] * len(wo_ids))
+    existing_rows = fetch_all(
+        f"""
+        SELECT wo_id
+        FROM   {SCHEMA}.flags
+        WHERE  flag_status = 1
+          AND  wo_id IN ({placeholders})
+        """,
+        wo_ids,
+    )
+    already_flagged = {row["wo_id"] for row in existing_rows}
 
-        # Insert new flag row
+    skipped  = [wo_id for wo_id in wo_ids if wo_id in already_flagged]
+    inserted = [wo_id for wo_id in wo_ids if wo_id not in already_flagged]
+
+    # One multi-row INSERT for every new flag, instead of one INSERT per WO.
+    if inserted:
+        values_placeholders = ", ".join(["(?, ?, ?, 1, ?, ?)"] * len(inserted))
+        insert_params = []
+
+        for wo_id in inserted:
+            insert_params.extend(
+                [wo_id, body.item_no or "", body.department, now, raised_by]
+            )
+
         fetch_all(
             f"""
             INSERT INTO {SCHEMA}.flags
                 (wo_id, item_no, department, flag_status, raised_date, raised_by)
-            VALUES (?, ?, ?, 1, ?, ?)
+            VALUES {values_placeholders}
             """,
-            [wo_id, body.item_no or "", body.department, now, raised_by],
+            insert_params,
         )
-        inserted.append(wo_id)
 
     return {
         "success":  True,
@@ -138,38 +153,48 @@ def resolve_flags(
     user: dict = Depends(require_permission("can_resolve_flag")),
 ):
     """
-    Sets flag_status = 0 and records resolved_date + resolved_by
-    for all active flag rows matching the given WO IDs.
+    Sets flag_status = 0 and records resolved_date + resolved_by for every
+    active flag row matching the given WO IDs, in a single batch.
     """
-    if not body.wo_ids:
+    wo_ids = list(dict.fromkeys(body.wo_ids))  # de-duplicate, keep order
+
+    if not wo_ids:
         raise HTTPException(status_code=400, detail="wo_ids cannot be empty.")
 
     now         = datetime.now(timezone.utc).isoformat()
     resolved_by = user.get("username", "unknown")
-    resolved    = []
-    not_found   = []
 
-    for wo_id in body.wo_ids:
-        existing = fetch_all(
-            f"SELECT sr_no FROM {SCHEMA}.flags WHERE wo_id = ? AND flag_status = 1 LIMIT 1",
-            [wo_id],
-        )
-        if not existing:
-            not_found.append(wo_id)
-            continue
+    # One query to find which of the requested WOs currently have an
+    # active flag, instead of one query per WO.
+    placeholders = ", ".join(["?"] * len(wo_ids))
+    existing_rows = fetch_all(
+        f"""
+        SELECT wo_id
+        FROM   {SCHEMA}.flags
+        WHERE  flag_status = 1
+          AND  wo_id IN ({placeholders})
+        """,
+        wo_ids,
+    )
+    currently_flagged = {row["wo_id"] for row in existing_rows}
 
+    resolved  = [wo_id for wo_id in wo_ids if wo_id in currently_flagged]
+    not_found = [wo_id for wo_id in wo_ids if wo_id not in currently_flagged]
+
+    # One UPDATE covering every resolved WO, instead of one UPDATE per WO.
+    if resolved:
+        update_placeholders = ", ".join(["?"] * len(resolved))
         fetch_all(
             f"""
             UPDATE {SCHEMA}.flags
             SET    flag_status   = 0,
                    resolved_date = ?,
                    resolved_by   = ?
-            WHERE  wo_id         = ?
-              AND  flag_status   = 1
+            WHERE  flag_status   = 1
+              AND  wo_id IN ({update_placeholders})
             """,
-            [now, resolved_by, wo_id],
+            [now, resolved_by, *resolved],
         )
-        resolved.append(wo_id)
 
     return {
         "success":   True,
