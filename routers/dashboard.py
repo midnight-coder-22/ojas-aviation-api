@@ -238,6 +238,29 @@ def _build_department_summary(
 
 
 # =============================================================================
+# ALL-DEPARTMENTS SUMMARY
+# =============================================================================
+
+def _build_all_departments_query() -> str:
+    """
+    Return one UNION ALL query that reads every department table in a
+    single round trip, tagging each row with its department so the
+    results can be split back apart afterward.
+    """
+    union_parts = [
+        f"""
+        SELECT
+            '{department}' AS department,
+            *
+        FROM {DEPT_TABLE_MAP[department]}
+        """
+        for department in DEPARTMENTS
+    ]
+
+    return "\nUNION ALL\n".join(union_parts)
+
+
+# =============================================================================
 # INCOMING FLOW
 # =============================================================================
 
@@ -382,16 +405,23 @@ def list_departments(
 def get_all_departments_summary(
     user: dict = Depends(get_current_user),
 ):
-    summaries: list[DepartmentSummary] = []
+    # One UNION ALL query across all 6 department tables instead of 6
+    # sequential round trips.
+    all_rows = fetch_all(_build_all_departments_query())
 
-    for department in DEPARTMENTS:
-        table_name = DEPT_TABLE_MAP[department]
-        rows = fetch_all(f"SELECT * FROM {table_name}")
-        summaries.append(
-            _build_department_summary(department, rows)
-        )
+    rows_by_department: dict[str, list[dict]] = {
+        department: [] for department in DEPARTMENTS
+    }
 
-    return summaries
+    for row in all_rows:
+        department = row.get("department")
+        if department in rows_by_department:
+            rows_by_department[department].append(row)
+
+    return [
+        _build_department_summary(department, rows_by_department[department])
+        for department in DEPARTMENTS
+    ]
 
 
 @router.get(
