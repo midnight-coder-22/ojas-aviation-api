@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     databricks_http_path: str
     databricks_token: str
     databricks_schema: str = "ojas_aviation"
+    databricks_pool_size: int = 5
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"

@@ -12,6 +12,7 @@ from slowapi.util import get_remote_address
 
 # Application configuration and API routers
 from config import settings
+from database import close_all_connections
 from routers.auth import router as auth_router
 from routers.dashboard import router as dashboard_router
 from routers.flags import router as flags_router
@@ -87,6 +88,17 @@ app.include_router(auth_router)        # Authentication endpoints
 app.include_router(dashboard_router)   # Dashboard KPI endpoints
 app.include_router(flags_router)       # Status flag endpoints
 app.include_router(edit_data_router)   # Data editing endpoints
+
+
+# ------------------------------------------------------------------
+# Shutdown: close pooled Databricks connections
+# ------------------------------------------------------------------
+# database.py keeps a small pool of long-lived connections instead of
+# reconnecting per query (see database.py). Close them cleanly when the
+# app shuts down (e.g. Cloud Run sends SIGTERM on scale-down/redeploy).
+@app.on_event("shutdown")
+def shutdown_event():
+    close_all_connections()
 
 
 # ------------------------------------------------------------------
