@@ -45,17 +45,21 @@ class WorkOrderKPI(BaseModel):
     wo_id: str
     item_no: Optional[str] = None
     item_code: Optional[str] = None
-    wo_name: str
+    # OWS "Item Desc" can be blank, and a work order that exists in OWS but
+    # not yet in WOS has no planned_qty. Both must be optional or a single
+    # incomplete row fails Pydantic validation and takes down the whole
+    # department response (500 error) instead of just that one row.
+    wo_name: Optional[str] = None
     dept_in_date: Optional[date] = None
     wo_target_date: Optional[date] = None
     dept_target_date: Optional[date] = None
     wo_ageing_days: Optional[int] = None
     dept_ageing_days: Optional[int] = None
-    planned_qty: int
+    planned_qty: Optional[int] = None
     next_dept: Optional[str] = None
     priority: str
     status: str
-    expected_steps: int
+    expected_steps: Optional[int] = None
     done_steps: int
     qc_alert: bool
     mi_alert: bool
