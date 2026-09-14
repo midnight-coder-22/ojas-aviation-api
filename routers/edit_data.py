@@ -3,6 +3,8 @@
 #
 # GET  /api/edit-data/wos       — read WorkOrderSummaryReport sheet as-is
 # GET  /api/edit-data/ows       — read OperationWiseWIPStatas sheet as-is
+# GET  /api/edit-data/grn-qc    — read Pending Purchase GRN QC sheet as-is
+# GET  /api/edit-data/wo-mi     — read Work Order vs Material Issue sheet as-is
 # POST /api/edit-data/commit    — write updated rows to Google Sheets ONLY
 # POST /api/edit-data/post-data — trigger Databricks pipeline job ONLY
 #
@@ -54,9 +56,36 @@ SHEET_CONFIG = {
     "ows": {
         "spreadsheet_id": settings.ows_spreadsheet_id,
         "tab_name": "Sheet1",
-        "columns": "A:S",
+        # A:T fits the newer report, which adds a CURRENT DEPARTMENT column.
+        "columns": "A:T",
+    },
+    "grn_qc": {
+        "spreadsheet_id": settings.qc_spreadsheet_id,
+        "tab_name": "GRN QC",
+        "columns": "A:Z",
+    },
+    "wo_mi": {
+        "spreadsheet_id": settings.qc_spreadsheet_id,
+        "tab_name": "WO MI",
+        "columns": "A:Z",
     },
 }
+
+
+def _get_sheet_config(sheet_key: str) -> dict:
+    """Return a sheet's config, rejecting one whose spreadsheet is not set."""
+
+    config = SHEET_CONFIG[sheet_key]
+
+    if not config["spreadsheet_id"]:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "QC_SPREADSHEET_ID is not configured on this server."
+            ),
+        )
+
+    return config
 
 
 def _get_sheet_range(config: dict) -> str:
@@ -283,28 +312,12 @@ def _trigger_databricks_job() -> int:
 
 
 # -----------------------------------------------------------------------------
-# GET /api/edit-data/wos
+# Sheet reads — row 0 is treated as the header row.
 # -----------------------------------------------------------------------------
 
 
-@router.get(
-    "/wos",
-    response_model=SheetDataResponse,
-    summary="Read WorkOrderSummaryReport sheet",
-)
-def get_wos_sheet(
-    user: dict = Depends(
-        require_permission("can_edit_data")
-    ),
-):
-    """
-    Fetch the full WorkOrderSummaryReport
-    Google Sheet as-is.
-
-    Row 0 is treated as the header row.
-    """
-
-    config = SHEET_CONFIG["wos"]
+def _read_sheet(sheet_key: str) -> SheetDataResponse:
+    config = _get_sheet_config(sheet_key)
 
     service = _get_sheets_service()
 
@@ -338,7 +351,7 @@ def get_wos_sheet(
 
     if not values:
         return SheetDataResponse(
-            sheet_name="wos",
+            sheet_name=sheet_key,
             headers=[],
             rows=[],
             total_rows=0,
@@ -348,11 +361,34 @@ def get_wos_sheet(
     data_rows = values[1:]
 
     return SheetDataResponse(
-        sheet_name="wos",
+        sheet_name=sheet_key,
         headers=headers,
         rows=data_rows,
         total_rows=len(data_rows),
     )
+
+
+# -----------------------------------------------------------------------------
+# GET /api/edit-data/wos
+# -----------------------------------------------------------------------------
+
+
+@router.get(
+    "/wos",
+    response_model=SheetDataResponse,
+    summary="Read WorkOrderSummaryReport sheet",
+)
+def get_wos_sheet(
+    user: dict = Depends(
+        require_permission("can_edit_data")
+    ),
+):
+    """
+    Fetch the full WorkOrderSummaryReport
+    Google Sheet as-is.
+    """
+
+    return _read_sheet("wos")
 
 
 # -----------------------------------------------------------------------------
@@ -373,59 +409,45 @@ def get_ows_sheet(
     """
     Fetch the full OperationWiseWIPStatas
     Google Sheet as-is.
-
-    Row 0 is treated as the header row.
     """
 
-    config = SHEET_CONFIG["ows"]
+    return _read_sheet("ows")
 
-    service = _get_sheets_service()
 
-    try:
-        result = (
-            service
-            .spreadsheets()
-            .values()
-            .get(
-                spreadsheetId=(
-                    config["spreadsheet_id"]
-                ),
-                range=_get_sheet_range(config),
-            )
-            .execute()
-        )
+# -----------------------------------------------------------------------------
+# GET /api/edit-data/grn-qc
+# -----------------------------------------------------------------------------
 
-    except Exception as error:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Google Sheets read failed: "
-                f"{error}"
-            ),
-        )
 
-    values = result.get(
-        "values",
-        [],
-    )
+@router.get(
+    "/grn-qc",
+    response_model=SheetDataResponse,
+    summary="Read Pending Purchase GRN QC sheet",
+)
+def get_grn_qc_sheet(
+    user: dict = Depends(
+        require_permission("can_edit_data")
+    ),
+):
+    return _read_sheet("grn_qc")
 
-    if not values:
-        return SheetDataResponse(
-            sheet_name="ows",
-            headers=[],
-            rows=[],
-            total_rows=0,
-        )
 
-    headers = values[0]
-    data_rows = values[1:]
+# -----------------------------------------------------------------------------
+# GET /api/edit-data/wo-mi
+# -----------------------------------------------------------------------------
 
-    return SheetDataResponse(
-        sheet_name="ows",
-        headers=headers,
-        rows=data_rows,
-        total_rows=len(data_rows),
-    )
+
+@router.get(
+    "/wo-mi",
+    response_model=SheetDataResponse,
+    summary="Read Work Order vs Material Issue sheet",
+)
+def get_wo_mi_sheet(
+    user: dict = Depends(
+        require_permission("can_edit_data")
+    ),
+):
+    return _read_sheet("wo_mi")
 
 
 # -----------------------------------------------------------------------------
@@ -452,9 +474,8 @@ def commit_changes(
     """
     Replace the contents of the selected Google Sheet.
 
-    body.sheet_name must be either:
-        wos
-        ows
+    body.sheet_name must be a SHEET_CONFIG key:
+        wos, ows, grn_qc, wo_mi
 
     This endpoint intentionally does NOT
     trigger the Databricks pipeline.
@@ -464,14 +485,15 @@ def commit_changes(
         raise HTTPException(
             status_code=400,
             detail=(
-                "sheet_name must be 'wos' or 'ows'. "
+                "sheet_name must be one of: "
+                f"{', '.join(SHEET_CONFIG)}. "
                 f"Got: '{body.sheet_name}'"
             ),
         )
 
-    config = SHEET_CONFIG[
+    config = _get_sheet_config(
         body.sheet_name
-    ]
+    )
 
     service = _get_sheets_service()
 

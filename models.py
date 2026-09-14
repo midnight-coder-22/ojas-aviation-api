@@ -110,6 +110,51 @@ class IncomingFlowResponse(BaseModel):
 
 
 # =============================================================================
+# QC DASHBOARD
+# =============================================================================
+
+class QcEntry(BaseModel):
+    """One open QC entry: an Inline/Final work order, or an Inward GRN line x WO."""
+
+    entry_id: str
+    qc_type: str
+    wo_id: Optional[str] = None
+    item_no: Optional[str] = None
+    item_code: Optional[str] = None
+    item_desc: Optional[str] = None
+    source_dept: Optional[str] = None
+    current_dept: Optional[str] = None
+    next_dept: Optional[str] = None
+    supplier_name: Optional[str] = None
+    grn_no: Optional[str] = None
+    grn_date: Optional[date] = None
+    invoice_no: Optional[str] = None
+    grn_qty: Optional[float] = None
+    issue_status: Optional[str] = None
+    required_qty: Optional[float] = None
+    issued_qty: Optional[float] = None
+    pending_issue_qty: Optional[float] = None
+    wo_item_code: Optional[str] = None
+    wo_item_desc: Optional[str] = None
+    qc_in_date: Optional[date] = None
+    qc_ageing_days: Optional[int] = None
+    planned_qty: Optional[float] = None
+    wo_start_date: Optional[date] = None
+    wo_target_date: Optional[date] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    op_seq_prod: Optional[str] = None
+    op_seq_qc: Optional[str] = None
+    has_active_flag: bool = False
+
+
+class QcDashboardResponse(BaseModel):
+    record_count: int
+    last_refreshed: Optional[datetime] = None
+    data: list[QcEntry]
+
+
+# =============================================================================
 # FLAGS
 # =============================================================================
 

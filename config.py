@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     wos_spreadsheet_id: str
     ows_spreadsheet_id: str
+    qc_spreadsheet_id: str | None = None
 
     google_service_account_json: str | None = None
     databricks_job_id: str | None = None

@@ -17,6 +17,7 @@ from routers.auth import router as auth_router
 from routers.dashboard import router as dashboard_router
 from routers.flags import router as flags_router
 from routers.edit_data import router as edit_data_router
+from routers.qc import router as qc_router
 
 
 # ------------------------------------------------------------------
@@ -88,6 +89,7 @@ app.include_router(auth_router)        # Authentication endpoints
 app.include_router(dashboard_router)   # Dashboard KPI endpoints
 app.include_router(flags_router)       # Status flag endpoints
 app.include_router(edit_data_router)   # Data editing endpoints
+app.include_router(qc_router)          # QC dashboard endpoints
 
 
 # ------------------------------------------------------------------
