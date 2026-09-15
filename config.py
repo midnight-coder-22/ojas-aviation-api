@@ -17,7 +17,17 @@ class Settings(BaseSettings):
 
     wos_spreadsheet_id: str
     ows_spreadsheet_id: str
-    qc_spreadsheet_id: str | None = None
+
+    # One Google Spreadsheet per ERP report (read from its first tab).
+    grn_qc_spreadsheet_id: str | None = None
+    wo_mi_spreadsheet_id: str | None = None
+    vendor_inward_spreadsheet_id: str | None = None
+    pdi_spreadsheet_id: str | None = None
+    cust_po_wo_spreadsheet_id: str | None = None
+    issue_vs_return_spreadsheet_id: str | None = None
+    material_issue_spreadsheet_id: str | None = None
+    po_grn_spreadsheet_id: str | None = None
+    material_return_spreadsheet_id: str | None = None
 
     google_service_account_json: str | None = None
     databricks_job_id: str | None = None

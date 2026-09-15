@@ -4,7 +4,7 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
 
 ## Layout
 - `main.py`: app, CORS (`CORS_ORIGIN`, comma-separated), slowapi rate limit (300/day per IP), router registration, pool shutdown.
-- `config.py`: pydantic settings from `.env` or Cloud Run env. Optional: `QC_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `DATABRICKS_JOB_ID`.
+- `config.py`: pydantic settings from `.env` or Cloud Run env (`cloudrun.env.yaml` is the reference). Optional: `GOOGLE_SERVICE_ACCOUNT_JSON`, `DATABRICKS_JOB_ID`, and one `<KEY>_SPREADSHEET_ID` per ERP report sheet (e.g. `GRN_QC_SPREADSHEET_ID`).
 - `database.py`: pooled Databricks SQL connections. `fetch_all(query, params)` uses `?` placeholders, returns a list of dicts, and retries once on a stale connection.
 - `security.py`, `dependencies.py`: JWT auth. Use `Depends(get_current_user)`, `require_role(...)`, or `require_permission("can_edit_data" | "can_flag" | "can_resolve_flag")`.
 - `models.py`: Pydantic request/response models (`WorkOrderKPI`, `DepartmentSummary`, `QcEntry`, ...).
@@ -13,7 +13,7 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
   - `dashboard.py`: `/api/departments`, `/api/dashboard/all/summary`, `/api/dashboard/{dept}`, `/summary`, `/incoming-flow`. Owns `_derive_dashboard_status` (live Overdue/Delayed), which `qc.py` reuses.
   - `qc.py`: `/api/qc/dashboard`. Returns every row of `qc_entries` plus live `qc_ageing_days` and `has_active_flag` (flags with department `QC`). Returns 503 while the table does not exist yet.
   - `flags.py`: `/api/flags`, `/api/flags/{dept}`, `/raise`, `/resolve`. A WO has at most one active flag across all departments.
-  - `edit_data.py`: `SHEET_CONFIG` (`wos`, `ows` A:T, `grn_qc`, `wo_mi`), one GET per sheet, `/commit` (clear and rewrite the sheet; never triggers the job), `/post-data` (Databricks Jobs API run-now; the only trigger).
+  - `edit_data.py`: `SHEET_CONFIG` = `wos`/`ows` (tab `Sheet1`, A:T) plus the nine `REPORT_SHEETS` (own spreadsheet each, first tab, A:AZ). `GET /sheet/{key}` reads any of them (`/wos`, `/ows` are older aliases), `/commit` clears and rewrites a sheet and never triggers the job, `/post-data` calls the Databricks Jobs API run-now and is the only trigger.
 - `databricks_save_tables.py`: legacy helper, not imported by the app.
 
 ## Conventions
@@ -21,7 +21,7 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
 - SQL: interpolate only `settings.databricks_schema` and constants; bind everything else with `?`.
 - Make response fields `Optional` unless the pipeline guarantees them; one incomplete row must not fail the whole response.
 - Delta `DATE`/`TIMESTAMP` values arrive as `date` / naive-UTC `datetime`. Business "today" is IST (`BUSINESS_TIMEZONE` in `dashboard.py`). Tag naive UTC timestamps before sending them to the browser (see `last_refreshed` in `qc.py`).
-- A new Edit Data sheet: add it to `SHEET_CONFIG` (spreadsheet id, tab, column range), add a GET route calling `_read_sheet`, and mirror it in the frontend's `EDIT_SHEETS`.
+- A new ERP report sheet: add its key to `REPORT_SHEETS`, a `<key>_spreadsheet_id` setting in `config.py` (plus `.env` and `cloudrun.env.yaml`), and mirror the key in the frontend's `EDIT_SHEETS`. No new route is needed.
 
 ## Run, test, deploy
 - `.venv/Scripts/python.exe -m uvicorn main:app --reload`. Needs `.env` and reads the production warehouse.

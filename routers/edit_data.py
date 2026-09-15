@@ -1,10 +1,8 @@
 # =============================================================================
 # routers/edit_data.py — Edit Data Routes
 #
-# GET  /api/edit-data/wos       — read WorkOrderSummaryReport sheet as-is
-# GET  /api/edit-data/ows       — read OperationWiseWIPStatas sheet as-is
-# GET  /api/edit-data/grn-qc    — read Pending Purchase GRN QC sheet as-is
-# GET  /api/edit-data/wo-mi     — read Work Order vs Material Issue sheet as-is
+# GET  /api/edit-data/sheet/{key} — read any SHEET_CONFIG sheet as-is
+# GET  /api/edit-data/wos, /ows   — older paths for WOS / OWS, same response
 # POST /api/edit-data/commit    — write updated rows to Google Sheets ONLY
 # POST /api/edit-data/post-data — trigger Databricks pipeline job ONLY
 #
@@ -47,6 +45,20 @@ SCOPES = [
 # Google Sheet configuration
 # -----------------------------------------------------------------------------
 
+# ERP reports that each live in their own spreadsheet; the setting is
+# <KEY>_SPREADSHEET_ID and the data sits on the first tab.
+REPORT_SHEETS = (
+    "grn_qc",
+    "wo_mi",
+    "vendor_inward",
+    "pdi",
+    "cust_po_wo",
+    "issue_vs_return",
+    "material_issue",
+    "po_grn",
+    "material_return",
+)
+
 SHEET_CONFIG = {
     "wos": {
         "spreadsheet_id": settings.wos_spreadsheet_id,
@@ -59,15 +71,15 @@ SHEET_CONFIG = {
         # A:T fits the newer report, which adds a CURRENT DEPARTMENT column.
         "columns": "A:T",
     },
-    "grn_qc": {
-        "spreadsheet_id": settings.qc_spreadsheet_id,
-        "tab_name": "GRN QC",
-        "columns": "A:Z",
-    },
-    "wo_mi": {
-        "spreadsheet_id": settings.qc_spreadsheet_id,
-        "tab_name": "WO MI",
-        "columns": "A:Z",
+    **{
+        key: {
+            "spreadsheet_id": getattr(settings, f"{key}_spreadsheet_id"),
+            "setting": f"{key.upper()}_SPREADSHEET_ID",
+            "tab_name": None,
+            # The widest report (PDI summary) has 44 columns.
+            "columns": "A:AZ",
+        }
+        for key in REPORT_SHEETS
     },
 }
 
@@ -81,7 +93,8 @@ def _get_sheet_config(sheet_key: str) -> dict:
         raise HTTPException(
             status_code=503,
             detail=(
-                "QC_SPREADSHEET_ID is not configured on this server."
+                f"{config.get('setting', 'The spreadsheet ID')} "
+                "is not configured on this server."
             ),
         )
 
@@ -90,8 +103,12 @@ def _get_sheet_config(sheet_key: str) -> dict:
 
 def _get_sheet_range(config: dict) -> str:
     """
-    Build a valid Google Sheets A1 range.
+    Build a valid Google Sheets A1 range. Without a tab name Google
+    uses the spreadsheet's first visible tab.
     """
+
+    if config["tab_name"] is None:
+        return config["columns"]
 
     tab_name = str(
         config["tab_name"]
@@ -415,39 +432,31 @@ def get_ows_sheet(
 
 
 # -----------------------------------------------------------------------------
-# GET /api/edit-data/grn-qc
+# GET /api/edit-data/sheet/{sheet_key}
 # -----------------------------------------------------------------------------
 
 
 @router.get(
-    "/grn-qc",
+    "/sheet/{sheet_key}",
     response_model=SheetDataResponse,
-    summary="Read Pending Purchase GRN QC sheet",
+    summary="Read any Edit Data sheet by its key",
 )
-def get_grn_qc_sheet(
+def get_sheet(
+    sheet_key: str,
     user: dict = Depends(
         require_permission("can_edit_data")
     ),
 ):
-    return _read_sheet("grn_qc")
+    if sheet_key not in SHEET_CONFIG:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Unknown sheet '{sheet_key}'. Valid sheets: "
+                f"{', '.join(SHEET_CONFIG)}"
+            ),
+        )
 
-
-# -----------------------------------------------------------------------------
-# GET /api/edit-data/wo-mi
-# -----------------------------------------------------------------------------
-
-
-@router.get(
-    "/wo-mi",
-    response_model=SheetDataResponse,
-    summary="Read Work Order vs Material Issue sheet",
-)
-def get_wo_mi_sheet(
-    user: dict = Depends(
-        require_permission("can_edit_data")
-    ),
-):
-    return _read_sheet("wo_mi")
+    return _read_sheet(sheet_key)
 
 
 # -----------------------------------------------------------------------------
@@ -474,8 +483,8 @@ def commit_changes(
     """
     Replace the contents of the selected Google Sheet.
 
-    body.sheet_name must be a SHEET_CONFIG key:
-        wos, ows, grn_qc, wo_mi
+    body.sheet_name must be a SHEET_CONFIG key
+    (wos, ows, or one of REPORT_SHEETS).
 
     This endpoint intentionally does NOT
     trigger the Databricks pipeline.
