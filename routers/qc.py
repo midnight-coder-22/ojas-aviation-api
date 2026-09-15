@@ -7,7 +7,7 @@
 # /api/dashboard/{department} would capture that path first.
 # =============================================================================
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from databricks.sql.exc import Error as DatabricksError
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +18,7 @@ from dependencies import get_current_user
 from models import QcDashboardResponse, QcEntry
 from routers.dashboard import (
     BUSINESS_TIMEZONE,
+    _as_utc,
     _derive_dashboard_status,
     _to_calendar_date,
 )
@@ -90,13 +91,9 @@ def get_qc_dashboard(
         (row["last_refreshed"] for row in rows if row.get("last_refreshed")),
         default=None,
     )
-    # The warehouse returns naive UTC timestamps; tag them so browsers
-    # don't read them as local time.
-    if last_refreshed is not None and last_refreshed.tzinfo is None:
-        last_refreshed = last_refreshed.replace(tzinfo=timezone.utc)
 
     return QcDashboardResponse(
         record_count=len(rows),
-        last_refreshed=last_refreshed,
+        last_refreshed=_as_utc(last_refreshed),
         data=[QcEntry(**row) for row in rows],
     )

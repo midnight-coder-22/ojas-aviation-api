@@ -3,7 +3,7 @@
 # =============================================================================
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -96,6 +96,16 @@ def _to_calendar_date(value: object) -> date | None:
         return None
 
 
+def _as_utc(value: object) -> object:
+    """
+    The warehouse returns naive UTC timestamps; tag them so browsers don't
+    read them as local time (a 5.5 hour error in IST).
+    """
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _normalize_dashboard_status(value: object) -> str:
     """Map source/display variants into canonical dashboard statuses."""
     status_key = re.sub(
@@ -143,6 +153,9 @@ def _prepare_dashboard_rows(rows: list[dict]) -> list[dict]:
         prepared_row["status"] = _derive_dashboard_status(
             prepared_row,
             today,
+        )
+        prepared_row["last_refreshed"] = _as_utc(
+            prepared_row.get("last_refreshed"),
         )
         prepared_rows.append(prepared_row)
 

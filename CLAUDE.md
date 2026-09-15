@@ -20,7 +20,7 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
 - A new dashboard gets its own router and prefix (like `/api/qc`). A fixed path under `/api/dashboard/` would be captured by `/api/dashboard/{department}`, which is registered first.
 - SQL: interpolate only `settings.databricks_schema` and constants; bind everything else with `?`.
 - Make response fields `Optional` unless the pipeline guarantees them; one incomplete row must not fail the whole response.
-- Delta `DATE`/`TIMESTAMP` values arrive as `date` / naive-UTC `datetime`. Business "today" is IST (`BUSINESS_TIMEZONE` in `dashboard.py`). Tag naive UTC timestamps before sending them to the browser (see `last_refreshed` in `qc.py`).
+- Delta `DATE`/`TIMESTAMP` values arrive as `date` / naive-UTC `datetime`. Business "today" is IST (`BUSINESS_TIMEZONE` in `dashboard.py`). Tag naive UTC timestamps with `_as_utc` (in `dashboard.py`) before they reach the browser. Every `last_refreshed` goes through it; otherwise browsers read them as local time, a 5.5 hour error in IST.
 - A new ERP report sheet: add its key to `REPORT_SHEETS`, a `<key>_spreadsheet_id` setting in `config.py` (plus `.env` and `cloudrun.env.yaml`), and mirror the key in the frontend's `EDIT_SHEETS`. No new route is needed.
 
 ## Run, test, deploy
