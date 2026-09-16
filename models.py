@@ -183,6 +183,59 @@ class FlagRecord(BaseModel):
 
 
 # =============================================================================
+# EXECUTIVE DASHBOARD
+# =============================================================================
+
+class OverdueByDepartmentRow(BaseModel):
+    """KPI 1: overdue work orders in one department, split by flag status."""
+
+    department: str
+    flagged: int
+    unflagged: int
+    total: int
+
+
+class MiPendingWorkOrder(BaseModel):
+    """KPI 2: one work order still waiting on a material issue."""
+
+    wo_id: str
+    department: str
+    ageing_days: Optional[int] = None
+
+
+class PendingWatchlistRow(BaseModel):
+    """KPI 0.5: one pending customer SO line or one pending GRN line."""
+
+    kind: str  # "SO" | "GRN"
+    reference_no: Optional[str] = None
+    item_no: Optional[str] = None
+    description: Optional[str] = None
+    material_available: Optional[bool] = None
+    ageing_days: Optional[int] = None
+
+
+class LossTrendPoint(BaseModel):
+    """KPI 3: one month's worth of commitment-fail loss within a financial year."""
+
+    month: str  # "YYYY-MM"
+    loss_amount: float
+    cumulative_loss: float
+
+
+class DelayOverdueTrendPoint(BaseModel):
+    """KPI 4: one department's Delayed+Overdue count on one snapshot date."""
+
+    snapshot_date: date
+    department: str
+    count: int
+
+
+class DataReminderResponse(BaseModel):
+    show: bool
+    message: Optional[str] = None
+
+
+# =============================================================================
 # EDIT DATA - GOOGLE SHEETS
 # =============================================================================
 
