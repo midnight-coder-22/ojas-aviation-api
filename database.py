@@ -21,7 +21,11 @@ from databricks.sql.exc import Error as DatabricksError
 from config import settings
 
 POOL_SIZE = settings.databricks_pool_size
-ACQUIRE_TIMEOUT_SECONDS = 30
+# How long a query waits for a free connection. The serverless warehouse
+# auto-stops when idle and takes 30-60 s to start again; the first queries
+# after that hold every pooled connection while it wakes up, so a shorter
+# wait failed the rest of the page's requests (seen 2026-09-28).
+ACQUIRE_TIMEOUT_SECONDS = 120
 
 _pool: "queue.Queue" = queue.Queue(maxsize=POOL_SIZE)
 _created_count = 0

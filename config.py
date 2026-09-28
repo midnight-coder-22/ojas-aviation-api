@@ -6,7 +6,8 @@ class Settings(BaseSettings):
     databricks_http_path: str
     databricks_token: str
     databricks_schema: str = "ojas_aviation"
-    databricks_pool_size: int = 5
+    # The Executive page alone fires ~9 requests at once, some with 2-3 queries each.
+    databricks_pool_size: int = 8
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"

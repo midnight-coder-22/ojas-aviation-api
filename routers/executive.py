@@ -72,6 +72,7 @@ SNAPSHOTS_TABLE = f"{SCHEMA}.exec_delay_overdue_snapshots"
 LOSS_RATE = 0.05
 REMINDER_TIME = (8, 45)  # IST, (hour, minute)
 SNAPSHOT_HOUR = 9        # IST
+MERGE_BATCH_ROWS = 300   # rows per MERGE statement in _merge_rows
 ALL_DEPT_CACHE_TTL_SECONDS = 8
 
 _tables_ensured = False
@@ -79,7 +80,7 @@ _all_dept_cache: dict = {"rows": None, "fetched_at": 0.0}
 
 # Shared across requests so independent Databricks round trips within one
 # endpoint run concurrently instead of back-to-back; sized comfortably under
-# database.py's connection pool (default 5) since at most 3 queries overlap
+# database.py's connection pool (default 8) since at most 3 queries overlap
 # from any single endpoint today.
 _io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="executive-io")
 
@@ -230,23 +231,31 @@ def _merge_rows(table: str, rows: list[dict], key_columns: list[str]) -> None:
 
     columns = list(rows[0].keys())
     row_placeholder = f"({', '.join(['?'] * len(columns))})"
-    values_sql = ", ".join([row_placeholder] * len(rows))
-    params = [row[column] for row in rows for column in columns]
 
     source_columns = ", ".join(columns)
     insert_columns = ", ".join(columns)
     insert_values = ", ".join(f"source.{column}" for column in columns)
     match_condition = " AND ".join(f"target.{column} = source.{column}" for column in key_columns)
 
-    fetch_all(
-        f"""
-        MERGE INTO {table} AS target
-        USING (VALUES {values_sql}) AS source({source_columns})
-        ON {match_condition}
-        WHEN NOT MATCHED THEN INSERT ({insert_columns}) VALUES ({insert_values})
-        """,
-        params,
-    )
+    # The column names go on the inline table inside a subquery: Databricks
+    # rejects them on the MERGE source itself ("USING (VALUES ...) AS
+    # source(cols)" -> COLUMN_ALIASES_NOT_ALLOWED). Batched so one statement
+    # never carries thousands of parameters; each batch is its own atomic
+    # MERGE and re-running any of them inserts nothing twice.
+    for start in range(0, len(rows), MERGE_BATCH_ROWS):
+        batch = rows[start:start + MERGE_BATCH_ROWS]
+        values_sql = ", ".join([row_placeholder] * len(batch))
+        fetch_all(
+            f"""
+            MERGE INTO {table} AS target
+            USING (
+                SELECT * FROM VALUES {values_sql} AS inline_rows({source_columns})
+            ) AS source
+            ON {match_condition}
+            WHEN NOT MATCHED THEN INSERT ({insert_columns}) VALUES ({insert_values})
+            """,
+            [row[column] for row in batch for column in columns],
+        )
 
 
 # =============================================================================
