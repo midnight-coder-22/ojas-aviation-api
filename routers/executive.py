@@ -54,16 +54,17 @@ from models import (
 from routers.dashboard import (
     BUSINESS_TIMEZONE,
     DEPARTMENTS,
-    _build_all_departments_query,
+    _build_all_departments_query_with_flags,
     _build_department_summary,
+    _has_vendor_movement,
     _prepare_dashboard_rows,
     _to_calendar_date,
+    _to_ist_date,
 )
 
 router = APIRouter(prefix="/api/executive", tags=["Executive"])
 
 SCHEMA = settings.databricks_schema
-FLAGS_TABLE = f"{SCHEMA}.flags"
 QC_TABLE = f"{SCHEMA}.qc_entries"
 LOSS_EVENTS_TABLE = f"{SCHEMA}.exec_loss_events"
 SNAPSHOTS_TABLE = f"{SCHEMA}.exec_delay_overdue_snapshots"
@@ -171,15 +172,6 @@ def _earliest_refreshed(rows: list[dict]) -> Optional[datetime]:
     )
 
 
-def _to_ist_date(value: Optional[datetime]) -> Optional[date]:
-    """Naive-UTC (as Databricks returns it) or tz-aware -> an IST calendar date."""
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(BUSINESS_TIMEZONE).date()
-
-
 def _fetch_rpt_or_503(query: str, params: list, report_label: str) -> list[dict]:
     try:
         return fetch_all(query, params)
@@ -260,12 +252,11 @@ def _merge_rows(table: str, rows: list[dict], key_columns: list[str]) -> None:
 # =============================================================================
 # LIVE DEPARTMENT ROWS (shared by every KPI below)
 #
-# Enriches dashboard.py's UNION ALL with a live flags join - the same
-# COALESCE(live, stored, FALSE) pattern _build_incoming_flow_query already
-# uses - because the stored has_active_flag column is only as fresh as the
-# last Post Data run, and department dashboards already override it with a
-# live /api/flags fetch. Without this, raising/resolving a flag would not
-# move a WO between KPI 1's flagged/unflagged bars until the next Post Data.
+# dashboard.py's UNION ALL with live WO-level flags (the same query the
+# department cards use), because the stored has_active_flag column is only
+# as fresh as the last Post Data run. Without it, raising/resolving a flag
+# would not move a WO between KPI 1's flagged/unflagged bars until the next
+# Post Data.
 #
 # Cached briefly: a single Executive page load fires this from 4 different
 # endpoints (overdue-by-department, mi-pending, delay-overdue-trend,
@@ -273,31 +264,6 @@ def _merge_rows(table: str, rows: list[dict], key_columns: list[str]) -> None:
 # reusing the result avoids 4 full 6-table scans for 4 requests using the
 # same underlying data.
 # =============================================================================
-
-def _build_all_departments_query_with_flags() -> str:
-    base_query = _build_all_departments_query()
-    return f"""
-        WITH active_flags AS (
-            SELECT
-                CAST(wo_id AS STRING) AS wo_id,
-                CASE
-                    WHEN MAX(CASE WHEN CAST(flag_status AS INT) = 1 THEN 1 ELSE 0 END) = 1
-                    THEN TRUE ELSE FALSE
-                END AS has_active_flag
-            FROM {FLAGS_TABLE}
-            WHERE wo_id IS NOT NULL
-            GROUP BY CAST(wo_id AS STRING)
-        ),
-        base AS (
-            {base_query}
-        )
-        SELECT
-            base.* EXCEPT (has_active_flag),
-            COALESCE(active_flags.has_active_flag, CAST(base.has_active_flag AS BOOLEAN), FALSE) AS has_active_flag
-        FROM base
-        LEFT JOIN active_flags ON active_flags.wo_id = CAST(base.wo_id AS STRING)
-    """
-
 
 def _get_all_department_rows() -> list[dict]:
     now = time.monotonic()
@@ -322,7 +288,10 @@ def _get_all_department_rows() -> list[dict]:
 
 def build_overdue_by_department(all_rows: list[dict]) -> list[dict]:
     prepared = _prepare_dashboard_rows(all_rows)
-    counts = {department: {"flagged": 0, "unflagged": 0} for department in DEPARTMENTS}
+    counts = {
+        department: {"flagged": 0, "unflagged": 0, "vendor_flagged": 0, "vendor_unflagged": 0}
+        for department in DEPARTMENTS
+    }
 
     for row in prepared:
         if row.get("status") != "Overdue":
@@ -332,12 +301,13 @@ def build_overdue_by_department(all_rows: list[dict]) -> list[dict]:
             continue
         bucket = "flagged" if bool(row.get("has_active_flag")) else "unflagged"
         counts[department][bucket] += 1
+        if _has_vendor_movement(row):
+            counts[department][f"vendor_{bucket}"] += 1
 
     return [
         {
             "department": department,
-            "flagged": counts[department]["flagged"],
-            "unflagged": counts[department]["unflagged"],
+            **counts[department],
             "total": counts[department]["flagged"] + counts[department]["unflagged"],
         }
         for department in DEPARTMENTS
@@ -397,23 +367,23 @@ def build_mi_pending_rows(
     if not pending_by_wo:
         return []
 
-    department_by_wo: dict[str, str] = {}
+    dept_row_by_wo: dict[str, dict] = {}
     for row in all_dept_rows:
         wo_id = _clean(row.get("wo_id"))
-        department = row.get("department")
-        if wo_id and department:
-            department_by_wo.setdefault(wo_id, department)
+        if wo_id and row.get("department"):
+            dept_row_by_wo.setdefault(wo_id, row)
 
     rows = []
     for wo_id, entry in pending_by_wo.items():
-        department = department_by_wo.get(wo_id)
-        if department is None:
+        dept_row = dept_row_by_wo.get(wo_id)
+        if dept_row is None:
             continue  # not part of the current live WIP universe (e.g. already Completed)
 
         rows.append({
             "wo_id": wo_id,
-            "department": department,
+            "department": dept_row["department"],
             "ageing_days": _ageing_days(today, entry["work_order_date"]),
+            "vendor_involved": _has_vendor_movement(dept_row),
         })
 
     return rows
@@ -462,6 +432,15 @@ def get_mi_pending(user: dict = Depends(get_current_user)):
 # table at all versus when we can see it and it's genuinely empty.
 # =============================================================================
 
+def _is_closed_po_line(row: dict) -> bool:
+    """
+    OpenClose = Close means the customer PO was closed, so its remaining
+    balance is no longer owed (user decision 2026-09-28): such lines are not
+    pending and cannot cause a loss. A blank or missing value counts as open.
+    """
+    return (_clean(row.get("openclose")) or "").upper() in {"CLOSE", "CLOSED"}
+
+
 def build_pending_watchlist_rows(
     cust_po_rows: list[dict],
     grn_rows: list[dict],
@@ -473,7 +452,7 @@ def build_pending_watchlist_rows(
 
     for row in cust_po_rows:
         bal_qty = _clean_number(row.get("balqty"))
-        if not bal_qty or bal_qty <= 0:
+        if not bal_qty or bal_qty <= 0 or _is_closed_po_line(row):
             continue
 
         rows.append({
@@ -525,7 +504,7 @@ def get_pending_watchlist(user: dict = Depends(get_current_user)):
     # than paying 3x one round-trip's latency back-to-back.
     cust_po_future = _io_pool.submit(
         _fetch_rpt_or_503,
-        f"SELECT sono, itemno, custname, itemdesc, balqty, podate FROM {SCHEMA}.rpt_cust_po_wo",
+        f"SELECT sono, itemno, custname, itemdesc, balqty, podate, openclose FROM {SCHEMA}.rpt_cust_po_wo",
         [],
         "The Pending Customer PO vs WO report",
     )
@@ -555,10 +534,16 @@ def get_pending_watchlist(user: dict = Depends(get_current_user)):
 #
 # Independent of the WOS/OWS Overdue/Delayed rule used everywhere else
 # (including KPI 1) - this is the Executive-only "commitment fail" the user
-# asked for, scoped to rpt_cust_po_wo alone. First time a given (so_no,
-# item_no) is observed overdue-and-unfulfilled, one loss event is recorded
-# and never re-fired for that line again (enforced by MERGE on event_id, not
-# by pre-fetching every historical key from Python - see _merge_rows).
+# asked for, scoped to rpt_cust_po_wo alone. First time an SO line is
+# observed overdue-and-unfulfilled, one loss event is recorded and never
+# re-fired for that line again (enforced by MERGE on event_id, not by
+# pre-fetching every historical key from Python - see _merge_rows).
+#
+# The report has no line number and one (SONo, ItemNo) can carry several
+# lines (different quantities or due dates), so a line is
+# SONo:ItemNo:DueDate:n, n numbering the lines that share the first three.
+# Event ids written before 2026-09-28 were just SONo:ItemNo, which folded
+# those lines into one event; _migrate_legacy_loss_events converts them.
 # =============================================================================
 
 def find_current_breaches(
@@ -568,7 +553,7 @@ def find_current_breaches(
 ) -> list[dict]:
     """Every SO/PO line currently overdue-and-unfulfilled - not filtered by
     what's already recorded; _merge_rows' MERGE handles that atomically."""
-    events = []
+    lines_by_key: dict[tuple[str, str, date], list[dict]] = {}
 
     for row in cust_po_rows:
         so_no = _clean(row.get("sono"))
@@ -580,12 +565,13 @@ def find_current_breaches(
         bal_qty = _clean_number(row.get("balqty"))
         if due_date is None or due_date >= today or not bal_qty or bal_qty <= 0:
             continue
+        if _is_closed_po_line(row):
+            continue
 
         rate = _clean_number(row.get("rate")) or 0.0
         qty = _clean_number(row.get("qty")) or 0.0
 
-        events.append({
-            "event_id": f"{so_no}:{item_no}",
+        lines_by_key.setdefault((so_no, item_no, due_date), []).append({
             "so_no": so_no,
             "item_no": item_no,
             "customer_name": _clean(row.get("custname")),
@@ -598,7 +584,87 @@ def find_current_breaches(
             "detected_at": detected_at,
         })
 
+    events = []
+    for (so_no, item_no, due_date), lines in lines_by_key.items():
+        # Number the lines in a fixed order so a re-ordered report gives
+        # the same ids.
+        lines.sort(key=lambda line: (line["qty"], line["rate"], line["bal_qty"]))
+        for position, line in enumerate(lines):
+            events.append({
+                "event_id": f"{so_no}:{item_no}:{due_date.isoformat()}:{position}",
+                **line,
+            })
+
     return events
+
+
+def _legacy_event_id(event: dict) -> str:
+    return f"{event['so_no']}:{event['item_no']}"
+
+
+def migrate_legacy_loss_events(
+    breaches: list[dict],
+    legacy_rows: list[dict],
+    activation_date: date,
+    report_keys: frozenset[str] = frozenset(),
+) -> tuple[list[dict], list[str]]:
+    """
+    Pure part of the one-time move from SONo:ItemNo ids to line ids.
+
+    Returns (line events to insert, legacy ids to delete). Every current
+    breach whose SONo:ItemNo had a legacy event becomes its own line event;
+    it is baseline exactly when its due date is before the day the KPI first
+    ran (it was already breaching then), so lines the old id had folded away
+    are recovered as real events. A legacy event whose SONo:ItemNo is still
+    in the report (report_keys) but no longer breaches - a closed PO - is
+    dropped. Legacy events whose line has left the report (since fulfilled)
+    are kept as they are.
+    """
+    legacy_by_id = {row["event_id"]: row for row in legacy_rows}
+    to_insert = []
+    replaced = {legacy_id for legacy_id in legacy_by_id if legacy_id in report_keys}
+
+    for event in breaches:
+        legacy = legacy_by_id.get(_legacy_event_id(event))
+        if legacy is None:
+            continue
+        replaced.add(legacy["event_id"])
+        is_baseline = event["due_date"] < activation_date
+        to_insert.append({
+            **event,
+            "detected_at": legacy.get("detected_at") or event["detected_at"],
+            "is_baseline": is_baseline,
+        })
+
+    return to_insert, sorted(replaced)
+
+
+def _migrate_legacy_loss_events(breaches: list[dict], report_keys: frozenset[str]) -> None:
+    legacy_rows = fetch_all(
+        f"SELECT event_id, detected_at FROM {LOSS_EVENTS_TABLE} "
+        "WHERE size(split(event_id, ':')) = 2"
+    )
+    if not legacy_rows:
+        return
+
+    first_run = fetch_all(f"SELECT MIN(detected_at) AS first_detected FROM {LOSS_EVENTS_TABLE}")
+    activation_date = _to_ist_date(first_run[0].get("first_detected")) if first_run else None
+    if activation_date is None:
+        return
+
+    to_insert, replaced_ids = migrate_legacy_loss_events(
+        breaches, legacy_rows, activation_date, report_keys,
+    )
+
+    # Insert first: if the DELETE below never runs, the next call finds the
+    # same legacy ids and repeats both steps (the MERGE skips what exists).
+    _merge_rows(LOSS_EVENTS_TABLE, to_insert, key_columns=["event_id"])
+    for start in range(0, len(replaced_ids), 500):
+        batch = replaced_ids[start:start + 500]
+        fetch_all(
+            f"DELETE FROM {LOSS_EVENTS_TABLE} WHERE event_id IN ({', '.join(['?'] * len(batch))})",
+            batch,
+        )
 
 
 def build_loss_trend(events: list[dict], financial_year: str) -> list[dict]:
@@ -636,6 +702,13 @@ def _record_new_loss_events(cust_po_rows: list[dict], today: date, detected_at: 
     _ensure_tables()
     is_baseline_seed = not _table_has_rows(LOSS_EVENTS_TABLE)
     breaches = find_current_breaches(cust_po_rows, today, detected_at)
+    if not is_baseline_seed:
+        report_keys = frozenset(
+            f"{_clean(row.get('sono'))}:{_clean(row.get('itemno'))}"
+            for row in cust_po_rows
+            if _clean(row.get("sono")) and _clean(row.get("itemno"))
+        )
+        _migrate_legacy_loss_events(breaches, report_keys)
     rows = [{**event, "is_baseline": is_baseline_seed} for event in breaches]
     _merge_rows(LOSS_EVENTS_TABLE, rows, key_columns=["event_id"])
 
@@ -647,7 +720,7 @@ def _record_new_loss_events(cust_po_rows: list[dict], today: date, detected_at: 
 )
 def get_loss_trend(financial_year: Optional[str] = None, user: dict = Depends(get_current_user)):
     cust_po_rows = _fetch_rpt_or_503(
-        f"SELECT sono, itemno, custname, duedate, balqty, rate, qty FROM {SCHEMA}.rpt_cust_po_wo",
+        f"SELECT sono, itemno, custname, duedate, balqty, rate, qty, openclose FROM {SCHEMA}.rpt_cust_po_wo",
         [],
         "The Pending Customer PO vs WO report",
     )

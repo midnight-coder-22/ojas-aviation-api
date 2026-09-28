@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     material_issue_spreadsheet_id: str | None = None
     po_grn_spreadsheet_id: str | None = None
     material_return_spreadsheet_id: str | None = None
+    f7_inward_spreadsheet_id: str | None = None
 
     google_service_account_json: str | None = None
     databricks_job_id: str | None = None

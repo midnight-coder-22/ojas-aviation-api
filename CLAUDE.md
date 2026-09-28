@@ -10,11 +10,12 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
 - `models.py`: Pydantic request/response models (`WorkOrderKPI`, `DepartmentSummary`, `QcEntry`, ...).
 - `routers/`
   - `auth.py`: `/api/auth/login`, `/api/auth/me`.
-  - `dashboard.py`: `/api/departments`, `/api/dashboard/all/summary`, `/api/dashboard/{dept}`, `/summary`, `/incoming-flow`. Owns `_derive_dashboard_status` (live Overdue/Delayed), which `qc.py` reuses.
-  - `qc.py`: `/api/qc/dashboard`. Returns every row of `qc_entries` plus live `qc_ageing_days` and `has_active_flag` (flags with department `QC`). Returns 503 while the table does not exist yet.
+  - `dashboard.py`: `/api/departments`, `/api/dashboard/all/summary`, `/api/dashboard/{dept}`, `/summary`, `/incoming-flow`. Owns `_derive_dashboard_status` (live status; Completed stays Completed), `_prepare_dashboard_rows` (live status and ageing), `_with_live_flags` / `_active_flags_cte` (per-WO flags from the `flags` table, used by every department query, the QC query and the Executive rows) and `_has_vendor_movement`. Summaries also carry `vendor_wo_count`, `vendor_flagged_count` and `vendor_status_breakdown` for the Vendor toggle.
+  - `qc.py`: `/api/qc/dashboard`. Returns every row of `qc_entries` plus live `qc_ageing_days` (floored at 0) and `has_active_flag` (the WO's active flag from any department). Returns 503 while the table does not exist yet.
   - `executive.py`: `/api/executive/overdue-by-department`, `/mi-pending`, `/pending-watchlist`, `/loss-trend`, `/delay-overdue-trend`, `/data-reminder`. All but the last two are pure live reads over `dept_*`, `rpt_cust_po_wo`, `rpt_grn_qc`, `rpt_wo_mi` and `qc_entries` — no notebook changes needed. `loss-trend` and `delay-overdue-trend` also opportunistically write to two new tables this router creates itself (`exec_loss_events`, `exec_delay_overdue_snapshots`, via `CREATE TABLE IF NOT EXISTS` — a deliberate exception to "notebooks own schema", see the file's module docstring). `loss-trend` seeds any already-breaching commitments as a silent baseline on first-ever call instead of backfilling years of history into day one.
   - `flags.py`: `/api/flags`, `/api/flags/{dept}`, `/raise`, `/resolve`. A WO has at most one active flag across all departments.
-  - `edit_data.py`: `SHEET_CONFIG` = `wos`/`ows` (tab `Sheet1`, A:T) plus the nine `REPORT_SHEETS` (own spreadsheet each, first tab, A:AZ). `GET /sheet/{key}` reads any of them (`/wos`, `/ows` are older aliases), `/commit` clears and rewrites a sheet and never triggers the job, `/post-data` calls the Databricks Jobs API run-now and is the only trigger.
+  - `edit_data.py`: `SHEET_CONFIG` = `wos`/`ows` (tab `Sheet1`, A:T) plus the ten `REPORT_SHEETS` (own spreadsheet each, first tab, A:AZ; `f7_inward` is the 57F4 Inward Summary). `GET /sheet/{key}` reads any of them (`/wos`, `/ows` are older aliases), `/commit` clears and rewrites a sheet with `valueInputOption=RAW` (values exactly as pasted) and never triggers the job, `/post-data` calls the Databricks Jobs API run-now and is the only trigger.
+  - Executive specifics: customer PO lines with `openclose` = Close are excluded from the watchlist and loss (`_is_closed_po_line`); loss events are keyed per SO line (`SONo:ItemNo:DueDate:n`) and older `SONo:ItemNo` ids are migrated once by `_migrate_legacy_loss_events`. KPI 1 rows carry `vendor_flagged`/`vendor_unflagged`, KPI 2 rows `vendor_involved`.
 - `databricks_save_tables.py`: legacy helper, not imported by the app.
 
 ## Conventions
@@ -26,5 +27,5 @@ Serves the Ojas Aviation dashboard from Delta tables in Databricks (schema `ojas
 
 ## Run, test, deploy
 - `.venv/Scripts/python.exe -m uvicorn main:app --reload`. Needs `.env` and reads the production warehouse.
-- There is no test suite in this repo. `../dev_tools/api_qc_test.py` exercises `qc.py` and the Edit Data config with Databricks and auth mocked; `../dev_tools/mock_api.py` serves the real QC router for frontend work.
-- Deploy: Cloud Run source deploy (`.gcloudignore`, `Procfile`). Ask the user before deploying.
+- There is no test suite in this repo. `../dev_tools/api_qc_test.py` exercises `qc.py`, live status/ageing and the Edit Data config and commit mode with Databricks and auth mocked; `../dev_tools/executive_pipeline_harness.py` the Executive router; `../dev_tools/kpi_audit.py` cross-checks every KPI on the live sheets; `../dev_tools/mock_api.py` serves the real routers for frontend work.
+- Deploy: `gcloud run deploy ojas-aviation-api --source . --region us-central1` (`.gcloudignore`, `Procfile`). Add new variables with `--update-env-vars`; never `--env-vars-file cloudrun.env.yaml` (it drops `GOOGLE_SERVICE_ACCOUNT_JSON`, which only lives on Cloud Run). Ask the user before deploying.

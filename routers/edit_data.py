@@ -57,6 +57,7 @@ REPORT_SHEETS = (
     "material_issue",
     "po_grn",
     "material_return",
+    "f7_inward",
 )
 
 SHEET_CONFIG = {
@@ -535,6 +536,12 @@ def commit_changes(
 
         # -------------------------------------------------------------
         # Write submitted content
+        #
+        # RAW stores every cell exactly as pasted. USER_ENTERED let Google
+        # re-read values as numbers and dates, which dropped leading zeros
+        # from item codes, re-formatted only some dates in a column (the
+        # sheets ended up mixing 03/05/2026 and 03-05-2026), and could show
+        # long numbers as 2.63E+08. The pipeline parses every value itself.
         # -------------------------------------------------------------
 
         (
@@ -546,7 +553,7 @@ def commit_changes(
                     config["spreadsheet_id"]
                 ),
                 range=_get_sheet_range(config),
-                valueInputOption="USER_ENTERED",
+                valueInputOption="RAW",
                 body={
                     "values": all_rows,
                 },

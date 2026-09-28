@@ -18,25 +18,24 @@ from dependencies import get_current_user
 from models import QcDashboardResponse, QcEntry
 from routers.dashboard import (
     BUSINESS_TIMEZONE,
+    _active_flags_cte,
     _as_utc,
+    _days_since,
     _derive_dashboard_status,
     _to_calendar_date,
 )
 
 router = APIRouter(prefix="/api/qc", tags=["QC"])
 
-QC_DEPARTMENT = "QC"
 QC_TABLE = f"{settings.databricks_schema}.qc_entries"
-FLAGS_TABLE = f"{settings.databricks_schema}.flags"
 
 
 def _prepare_qc_row(row: dict, today: date) -> dict:
     """Add live QC ageing and the live WO status used by every dashboard."""
     prepared = dict(row)
 
-    qc_in_date = _to_calendar_date(prepared.get("qc_in_date"))
-    prepared["qc_ageing_days"] = (
-        (today - qc_in_date).days if qc_in_date is not None else None
+    prepared["qc_ageing_days"] = _days_since(
+        today, _to_calendar_date(prepared.get("qc_in_date")),
     )
 
     # Inward entries whose WO is not in the WIP report have no status to derive.
@@ -54,25 +53,21 @@ def _prepare_qc_row(row: dict, today: date) -> dict:
 def get_qc_dashboard(
     user: dict = Depends(get_current_user),
 ):
+    # Flags are per WO (see dashboard.py): a WO flagged from any department
+    # shows as flagged here too, and Resolve Flag clears it everywhere.
     query = f"""
-        WITH active_qc_flags AS (
-            SELECT CAST(wo_id AS STRING) AS wo_id
-            FROM {FLAGS_TABLE}
-            WHERE flag_status = 1
-              AND UPPER(department) = ?
-            GROUP BY CAST(wo_id AS STRING)
-        )
+        WITH {_active_flags_cte()}
         SELECT
             qc.*,
-            active_qc_flags.wo_id IS NOT NULL AS has_active_flag
+            COALESCE(active_flags.has_active_flag, FALSE) AS has_active_flag
         FROM {QC_TABLE} AS qc
-        LEFT JOIN active_qc_flags
-          ON active_qc_flags.wo_id = qc.wo_id
+        LEFT JOIN active_flags
+          ON active_flags.wo_id = qc.wo_id
         ORDER BY qc.qc_in_date ASC NULLS LAST, qc.entry_id
     """
 
     try:
-        raw_rows = fetch_all(query, [QC_DEPARTMENT])
+        raw_rows = fetch_all(query)
     except DatabricksError as error:
         if "TABLE_OR_VIEW_NOT_FOUND" in str(error):
             raise HTTPException(

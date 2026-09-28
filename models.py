@@ -65,6 +65,13 @@ class WorkOrderKPI(BaseModel):
     mi_alert: bool
     has_active_flag: bool = False
     last_refreshed: Optional[datetime] = None
+    # Vendor movement from the F7 (57F4 inward) report, matched on item and
+    # WO start date. None until a pipeline run with the F7 sheet.
+    vendor_lots: Optional[int] = None
+    vendor_ops: Optional[str] = None
+    vendor_names: Optional[str] = None
+    vendor_days: Optional[int] = None
+    last_vendor_in_date: Optional[date] = None
 
 
 class DepartmentResponse(BaseModel):
@@ -82,6 +89,10 @@ class DepartmentSummary(BaseModel):
     status_breakdown: dict[str, int]
     priority_breakdown: dict[str, int]
     last_refreshed: Optional[datetime] = None
+    # WOs that had material at a job-work vendor, and their statuses.
+    vendor_wo_count: int = 0
+    vendor_flagged_count: int = 0
+    vendor_status_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
 class IncomingFlowRow(BaseModel):
@@ -193,6 +204,9 @@ class OverdueByDepartmentRow(BaseModel):
     flagged: int
     unflagged: int
     total: int
+    # The part of flagged / unflagged whose WO had material at a vendor.
+    vendor_flagged: int = 0
+    vendor_unflagged: int = 0
 
 
 class MiPendingWorkOrder(BaseModel):
@@ -201,6 +215,7 @@ class MiPendingWorkOrder(BaseModel):
     wo_id: str
     department: str
     ageing_days: Optional[int] = None
+    vendor_involved: bool = False
 
 
 class PendingWatchlistRow(BaseModel):

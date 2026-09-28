@@ -121,13 +121,17 @@ def _derive_dashboard_status(row: dict, today: date) -> str:
     Derive the live dashboard status.
 
     Deadline precedence:
-    1. If WO Due Dt is before today -> Overdue.
-    2. Else if Dept Due Dt is before today -> Delayed.
-    3. Otherwise preserve the normal canonical source status.
+    1. A Completed WO stays Completed: a finished WO cannot run late.
+    2. If WO Due Dt is before today -> Overdue.
+    3. Else if Dept Due Dt is before today -> Delayed.
+    4. Otherwise preserve the normal canonical source status.
 
     Overdue always takes precedence over Delayed.
     """
     base_status = _normalize_dashboard_status(row.get("status"))
+
+    if base_status == "Completed":
+        return base_status
 
     wo_due_date = _to_calendar_date(row.get("wo_target_date"))
     if wo_due_date is not None and wo_due_date < today:
@@ -140,8 +144,48 @@ def _derive_dashboard_status(row: dict, today: date) -> str:
     return base_status
 
 
+def _to_ist_date(value: object) -> date | None:
+    """A naive-UTC (as Databricks returns it) or tz-aware timestamp -> its IST calendar date."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(BUSINESS_TIMEZONE).date()
+
+
+def _days_since(today: date, past: date | None) -> int | None:
+    """Whole days from `past` to today, floored at 0 (a future ERP date is not negative ageing)."""
+    if past is None:
+        return None
+    return max(0, (today - past).days)
+
+
+def _live_ageing(row: dict, today: date) -> tuple[int | None, int | None]:
+    """
+    (wo_ageing_days, dept_ageing_days) as of today, like the live status.
+
+    The department tables store both as of the last Post Data run, so they
+    fall behind by a day for every day without a run while the status next
+    to them is live. Department ageing is recomputed from dept_in_date; WO
+    ageing (the table has no start date) is the stored value moved forward
+    by the days since that run.
+    """
+    dept_ageing = _days_since(today, _to_calendar_date(row.get("dept_in_date")))
+
+    stored_wo_ageing = row.get("wo_ageing_days")
+    refreshed_on = _to_ist_date(row.get("last_refreshed"))
+    if stored_wo_ageing is None:
+        wo_ageing = None
+    elif refreshed_on is None:
+        wo_ageing = max(0, int(stored_wo_ageing))
+    else:
+        wo_ageing = max(0, int(stored_wo_ageing) + max(0, (today - refreshed_on).days))
+
+    return wo_ageing, dept_ageing
+
+
 def _prepare_dashboard_rows(rows: list[dict]) -> list[dict]:
-    """Return copied rows containing the live canonical dashboard status."""
+    """Return copied rows with the live canonical dashboard status and ageing."""
     if not rows:
         return []
 
@@ -154,6 +198,10 @@ def _prepare_dashboard_rows(rows: list[dict]) -> list[dict]:
             prepared_row,
             today,
         )
+        (
+            prepared_row["wo_ageing_days"],
+            prepared_row["dept_ageing_days"],
+        ) = _live_ageing(prepared_row, today)
         prepared_row["last_refreshed"] = _as_utc(
             prepared_row.get("last_refreshed"),
         )
@@ -185,6 +233,14 @@ def _resolve_department(dept_param: str) -> str:
         )
 
     return normalized
+
+
+def _has_vendor_movement(row: dict) -> bool:
+    """The WO had material at a job-work vendor (F7 report, via the pipeline)."""
+    try:
+        return int(row.get("vendor_lots") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _build_department_summary(
@@ -231,12 +287,18 @@ def _build_department_summary(
         "High": 0,
     }
 
+    vendor_status_breakdown: dict[str, int] = {
+        status: 0 for status in CANONICAL_STATUS_ORDER
+    }
+
     for row in prepared_rows:
         status = str(row.get("status") or "New").strip() or "New"
         priority = str(row.get("priority") or "Low").strip() or "Low"
 
         status_breakdown[status] = status_breakdown.get(status, 0) + 1
         priority_breakdown[priority] = priority_breakdown.get(priority, 0) + 1
+        if _has_vendor_movement(row):
+            vendor_status_breakdown[status] = vendor_status_breakdown.get(status, 0) + 1
 
     return DepartmentSummary(
         department=department,
@@ -247,6 +309,12 @@ def _build_department_summary(
         status_breakdown=status_breakdown,
         priority_breakdown=priority_breakdown,
         last_refreshed=prepared_rows[0].get("last_refreshed"),
+        vendor_wo_count=sum(vendor_status_breakdown.values()),
+        vendor_flagged_count=sum(
+            1 for row in prepared_rows
+            if _has_vendor_movement(row) and bool(row.get("has_active_flag"))
+        ),
+        vendor_status_breakdown=vendor_status_breakdown,
     )
 
 
@@ -271,6 +339,60 @@ def _build_all_departments_query() -> str:
     ]
 
     return "\nUNION ALL\n".join(union_parts)
+
+
+# =============================================================================
+# LIVE FLAGS
+#
+# Flags are per WO: a WO has at most one active flag across all departments
+# (raise skips a WO flagged anywhere, resolve clears it everywhere), so every
+# page shows a WO as flagged whichever department raised it. The flags table
+# is the live source; the has_active_flag column in the department tables is
+# only as fresh as the last Post Data run and is used just as a fallback for
+# WOs the flags table has never seen.
+# =============================================================================
+
+FLAGS_TABLE = f"{settings.databricks_schema}.flags"
+
+
+def _active_flags_cte() -> str:
+    return f"""
+        active_flags AS (
+            SELECT
+                CAST(wo_id AS STRING) AS wo_id,
+                MAX(
+                    CASE WHEN CAST(flag_status AS INT) = 1 THEN 1 ELSE 0 END
+                ) = 1 AS has_active_flag
+            FROM {FLAGS_TABLE}
+            WHERE wo_id IS NOT NULL
+            GROUP BY CAST(wo_id AS STRING)
+        )
+    """
+
+
+def _with_live_flags(base_query: str, order_by: str = "") -> str:
+    """Wrap a department-table query so has_active_flag comes from the flags table."""
+    return f"""
+        WITH {_active_flags_cte()},
+        base AS (
+            {base_query}
+        )
+        SELECT
+            base.* EXCEPT (has_active_flag),
+            COALESCE(
+                active_flags.has_active_flag,
+                CAST(base.has_active_flag AS BOOLEAN),
+                FALSE
+            ) AS has_active_flag
+        FROM base
+        LEFT JOIN active_flags
+          ON active_flags.wo_id = CAST(base.wo_id AS STRING)
+        {order_by}
+    """
+
+
+def _build_all_departments_query_with_flags() -> str:
+    return _with_live_flags(_build_all_departments_query())
 
 
 # =============================================================================
@@ -332,25 +454,9 @@ def _build_incoming_flow_query(
         params.append(target_department)
 
     union_sql = "\nUNION ALL\n".join(union_parts)
-    flags_table = f"{settings.databricks_schema}.flags"
 
     query = f"""
-        WITH active_flags AS (
-            SELECT
-                CAST(wo_id AS STRING) AS wo_id,
-                CASE
-                    WHEN MAX(
-                        CASE
-                            WHEN CAST(flag_status AS INT) = 1 THEN 1
-                            ELSE 0
-                        END
-                    ) = 1 THEN TRUE
-                    ELSE FALSE
-                END AS has_active_flag
-            FROM {flags_table}
-            WHERE wo_id IS NOT NULL
-            GROUP BY CAST(wo_id AS STRING)
-        ),
+        WITH {_active_flags_cte()},
         incoming_raw AS (
             {union_sql}
         ),
@@ -419,8 +525,9 @@ def get_all_departments_summary(
     user: dict = Depends(get_current_user),
 ):
     # One UNION ALL query across all 6 department tables instead of 6
-    # sequential round trips.
-    all_rows = fetch_all(_build_all_departments_query())
+    # sequential round trips, with live flags so the Executive department
+    # cards count the same flagged WOs as its Overdue chart.
+    all_rows = fetch_all(_build_all_departments_query_with_flags())
 
     rows_by_department: dict[str, list[dict]] = {
         department: [] for department in DEPARTMENTS
@@ -448,7 +555,7 @@ def get_department_summary(
 ):
     resolved_department = _resolve_department(department)
     table_name = DEPT_TABLE_MAP[resolved_department]
-    rows = fetch_all(f"SELECT * FROM {table_name}")
+    rows = fetch_all(_with_live_flags(f"SELECT * FROM {table_name}"))
 
     return _build_department_summary(
         resolved_department,
@@ -541,11 +648,10 @@ def get_department_dashboard(
     table_name = DEPT_TABLE_MAP[resolved_department]
 
     raw_rows = fetch_all(
-        f"""
-        SELECT *
-        FROM {table_name}
-        ORDER BY wo_ageing_days DESC NULLS LAST
-        """
+        _with_live_flags(
+            f"SELECT * FROM {table_name}",
+            order_by="ORDER BY wo_ageing_days DESC NULLS LAST",
+        )
     )
     rows = _prepare_dashboard_rows(raw_rows)
 
